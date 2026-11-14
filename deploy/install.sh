@@ -1110,6 +1110,19 @@ topic read zigbee2mqtt/+
 topic read zigbee2mqtt/bridge/state
 topic read zigbee2mqtt/bridge/event
 topic read zigbee2mqtt/bridge/devices
+
+# A device that holds an account of its own (docs/mqtt-integrations.md). Such
+# an account is named for the device, and mosquitto puts the name a client
+# signed in with where %u stands — so these two lines give every device its
+# own topics and nothing else, with no line to write per device. They add
+# nothing for the two accounts above, which reach these topics already.
+pattern readwrite gethome/device/%u/#
+pattern readwrite gethome/discovery/%u/#
+
+# Everything below the next line is written by gethome-mqtt-accounts.sh from
+# the hub's list of device accounts: for each device that is part of a
+# project, that project's own topics. It must stay the last line here.
+# gethome:device-accounts
 MOSQACL
 
   # ── These two files are read by the broker, not by root ──────────────────
@@ -1133,6 +1146,37 @@ MOSQACL
     MQTT_SECURED=""
     $SUDO rm -f "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null || true
     warn "The MQTT broker's own account can't read the password file this machine would need, so the broker is staying open to the local network."
+  fi
+fi
+
+# ── A device that holds its own account keeps it across this run ───────────
+# `mosquitto_passwd -c` above began the password file again with the broker's
+# own two accounts, and the ACL is written whole — so every account the hub has
+# given a device (src/core/mqtt-device-accounts.ts) has just gone from both.
+# deploy/mqtt-accounts.sh puts them back from the hub's own list, here, before
+# the broker is restarted below and reads either file: a board must never find
+# its password refused because its hub was updated.
+#
+# The hub's note of what was last applied goes first. If the script then cannot
+# run — a first install has no list yet, and that is fine — nothing is left
+# claiming the list is in force, and the hub asks for it again when it starts.
+#
+# **Whether this machine gives devices their own accounts at all** is decided
+# here too, by what the broker's own tool just wrote. The hub writes a device's
+# line itself, as the PBKDF2-SHA512 hash mosquitto 2 stores (`$7$…`), so it
+# never has to hand a password to root. A broker whose tool writes anything
+# else — mosquitto 1's plain SHA-512, or whatever a later one moves to — is one
+# the hub does not know how to write a line for, and there devices are not
+# offered an account of their own: they share `gethome`, as they always did.
+MQTT_DEVICE_ACCOUNTS=""
+if [[ -n "$MQTT_SECURED" ]]; then
+  as_service_user rm -f "${DATA_DIR}/mqtt-accounts/result" 2>/dev/null || true
+  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" \
+    bash "$HUB_DIR/deploy/mqtt-accounts.sh" --no-reload --quiet >/dev/null 2>&1 || true
+  if $SUDO awk -F: -v user="$MQTT_HUB_USER" \
+    '$1 == user && substr($2, 1, 3) == "$7$" { found = 1 } END { exit found ? 0 : 1 }' \
+    "$MQTT_PASSWD_FILE" 2>/dev/null; then
+    MQTT_DEVICE_ACCOUNTS=1
   fi
 fi
 
@@ -2849,6 +2893,75 @@ DISPATCH
 WIFI_NETWORKS_UNITS=""
 manage_wifi_networks
 
+# ── A broker account for each device, given from an app ────────────────────
+# So a board somebody sets up signs in to the broker as itself, reaches only
+# its own topics, and stops working when it is deleted. Same shape again: the
+# hub writes its list of accounts into its own data directory, the path unit
+# notices, and the root script rebuilds mosquitto's password file and ACL from
+# it. deploy/mqtt-accounts.sh says what it refuses and why.
+#
+# `enabled` is the capability, written in the same breath as the units for the
+# reason `update/enabled` is, and only where the broker asks for a password and
+# stores one the way the hub writes a device's (MQTT_DEVICE_ACCOUNTS, decided
+# beside the password file above). Without it the hub offers no device an
+# account and every board shares `gethome`, which is what a hub from before
+# this does.
+manage_mqtt_device_accounts() {
+  local helper="${GETHOME_MQTT_ACCOUNTS_BIN:-/usr/local/lib/gethome-mqtt-accounts.sh}"
+  local accounts_dir="${DATA_DIR}/mqtt-accounts"
+
+  # Everything inside the directory as the hub's account (`as_service_user`).
+  as_service_user mkdir -p "$accounts_dir" 2>/dev/null || true
+  as_service_user rm -f "$accounts_dir/enabled" 2>/dev/null || true
+  [[ -n "$MQTT_DEVICE_ACCOUNTS" ]] || return 0
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/mqtt-accounts.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the broker-account helper, so every device set up on this hub will share one MQTT account."
+    return 0
+  fi
+
+  $SUDO tee /etc/systemd/system/gethome-mqtt-accounts.path >/dev/null <<UNIT
+[Unit]
+Description=Notice that the GetHome Hub's list of device accounts on the MQTT broker changed
+
+[Path]
+PathModified=${accounts_dir}/request
+Unit=gethome-mqtt-accounts.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # Started by the path unit and nothing else: no [Install], never enabled.
+  # No start limit, because each run is one small rewrite and a refusal to
+  # start is a device that keeps an account it should have lost — systemd's
+  # default of five starts in ten seconds is a handful of boards set up in a
+  # row, and passing it parks the path unit too until somebody resets it.
+  $SUDO tee /etc/systemd/system/gethome-mqtt-accounts.service >/dev/null <<UNIT
+[Unit]
+Description=Give the GetHome Hub's devices their own accounts on the MQTT broker
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
+ExecStart=${helper} --quiet
+TimeoutStartSec=60
+UNIT
+
+  # A hub that tried an earlier build may hold files root made here; `chown -R`
+  # hands them back without following anything (see `as_service_user`).
+  $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$accounts_dir" 2>/dev/null || true
+  as_service_user chmod 0750 "$accounts_dir" 2>/dev/null || true
+  as_service_user touch "$accounts_dir/enabled" 2>/dev/null || true
+  MQTT_ACCOUNTS_UNITS=1
+}
+MQTT_ACCOUNTS_UNITS=""
+manage_mqtt_device_accounts
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
@@ -2856,6 +2969,9 @@ $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
 if [[ -n "$WIFI_NETWORKS_UNITS" ]]; then
   $SUDO systemctl enable --now gethome-wifi.path >/dev/null 2>&1 || true
+fi
+if [[ -n "$MQTT_ACCOUNTS_UNITS" ]]; then
+  $SUDO systemctl enable --now gethome-mqtt-accounts.path >/dev/null 2>&1 || true
 fi
 # Zigbee2MQTT, when it is already running, is holding a broker connection that
 # was opened before any of this and may have been anonymous. Its unit has just

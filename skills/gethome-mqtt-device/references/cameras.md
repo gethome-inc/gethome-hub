@@ -70,7 +70,7 @@ carries one.
 
 ## Proving it is the device
 
-Every device signs in to the broker with the same `gethome` account, so an
+Devices may all sign in to the broker with the same `gethome` account, so an
 announcement alone could aim the hub at any address in the house. Before it
 fetches a picture, the hub asks that address `GET /gethome/id` — **on the
 stream's own port first, then on port 80** — and goes on only when the answer

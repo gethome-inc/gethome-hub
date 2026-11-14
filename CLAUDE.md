@@ -844,8 +844,9 @@ adapter/registry/API change.
   `read`: that is `authed` copied onto a `POST`, the one mistake worth stopping
   loudly. `test/api-keys.test.ts` holds the whole table route by route — a new
   route needs its line there, which is the point. Never through a key: minting
-  a credential (`POST /invites`, `/api-keys`), changing or ending a membership
-  (`/members/me`), and every conversation, reading included.
+  a credential (`POST /invites`, `/api-keys`, a device's broker account on
+  `/mqtt/device-accounts`), changing or ending a membership (`/members/me`),
+  and every conversation, reading included.
   **A handler asks as the caller, never as the bare member** — `can(access,
   request, p)` from `api/auth.ts`, `canAs`/`permissionsAs` on the socket.
   `access.can(request.member.id, …)` compiles, passes every member test and
@@ -908,7 +909,7 @@ The full contract — the installer's marker vocabulary, the radio budget,
 Zigbee detection, memory limits and cgroups, mosquitto's two accounts, Wi-Fi
 power save and reachability, mDNS, bundles, versioning and rollback — is in
 `deploy/CLAUDE.md`, which loads when you work under `deploy/`. Read it before
-touching anything there. Six of its rules have a `src/` half and bind code
+touching anything there. Seven of its rules have a `src/` half and bind code
 outside `deploy/`, so they stay here:
 
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** The Mac app, gethome studio,
@@ -948,6 +949,22 @@ outside `deploy/`, so they stay here:
   app can reach to put it back. And the file format is the hub's
   `requestWifiChange` on one side and the script's `field` on the other, which
   is why `test/deploy-wifi-networks.test.ts` writes with the first and runs the
+  second rather than testing either alone.
+- **The hub records its devices' broker accounts the same way, and never a
+  password.** `POST`/`DELETE /mqtt/device-accounts` and every removed MQTT
+  device (`src/core/mqtt-device-accounts.ts`) rewrite one list in
+  `<data>/mqtt-accounts/` — a device id, a project key and mosquitto's own
+  hash of a password per line — and `deploy/mqtt-accounts.sh` rebuilds the
+  broker's password file and ACL from it as root and has the broker read them
+  again; `<data>/mqtt-accounts/enabled` is the capability. Three rules cross
+  the boundary. **The id is the broker username**, so it stays the MQTT
+  convention's device id and never either of the broker's own two names —
+  refused by the hub *and* by the script. **The list is whole and the hash is
+  the hub's**, so the installer can put every account back after it writes the
+  password file afresh, and nothing root reads is a secret. And the file
+  format is the service's `listBody` on one side and the script's
+  `valid_accounts` on the other, which is why
+  `test/mqtt-device-accounts.test.ts` writes with the first and runs the
   second rather than testing either alone.
 - **The hub records where its Matter accessories are, and the keep-alive asks
   after them.** `src/adapters/matter/neighbours.ts` writes each accessory's

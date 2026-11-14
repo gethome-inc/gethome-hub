@@ -91,8 +91,9 @@ redirect, sends no credentials, relays nothing but images, and only once the
 board has proved it is the device it says it is
 ([`api.md`](api.md#cameras)). The pictures pass
 through and are not stored. That rule exists because a camera's address is
-announced by the device itself, over a broker account every board in the house
-shares — without it, an announcement could point the hub at your router.
+announced by the device itself, and the broker account a device announces over
+may be one every board in the house shares — without it, an announcement could
+point the hub at your router.
 
 Installing and updating the hub also download from GitHub, nodejs.org and npm,
 and Zigbee2MQTT may ask GitHub whether your devices have new firmware. Those are
@@ -159,6 +160,23 @@ serving it, not a security boundary.
   repository, a forum post, a conversation with an AI. When and from which
   address each key was last used stays on the hub, for the home to see —
   [`api.md`](api.md#api-keys).
+- **The broker asks for a password, and a device can hold an account of its
+  own.** `gethome` is the account you give to something you wire in yourself:
+  it writes anywhere under `gethome/` and can watch what Zigbee devices report,
+  but cannot switch one on or open the network for pairing. It is one password
+  for everything that holds it, and the hub cannot take it back from a board —
+  rotating it (`gethome-hubctl mqtt --rotate`) means visiting every device that
+  had it. So an app that sets a device up can ask the hub for **that device's
+  own account** instead: named for the device, able to read and write that
+  device's topics and nothing else — not another device's, not Zigbee, and of
+  a project's shared topics only its own project's. The hub hands the password
+  over once and keeps only the broker's hash of it. Deleting the device ends
+  the account and the broker hangs up on the board, so a deleted board stays
+  deleted even if it was switched off at the time. Who gave which device an
+  account is in the activity log. One limit to be exact about: this confines
+  the device that holds such an account, and does not stop somebody holding
+  the shared `gethome` password from writing to that device's topics —
+  [`api.md`](api.md#a-broker-account-for-each-device-mqttdevice-accounts).
 - **No query string reaches the hub's log.** A credential sent in a URL is
   where it is most often leaked, so even at `debug` the hub writes the path of a
   request and never what follows the `?`.

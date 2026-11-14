@@ -434,7 +434,7 @@ cmd_uninstall() {
   # units that no longer existed.
   $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service \
     gethome-wifi-awake.service gethome-wifi-keepalive.service gethome-wifi-restore.service \
-    gethome-radio.path gethome-update.path gethome-wifi.path >/dev/null 2>&1 || true
+    gethome-radio.path gethome-update.path gethome-wifi.path gethome-mqtt-accounts.path >/dev/null 2>&1 || true
   $SUDO rm -f /etc/systemd/system/gethome-*.service /etc/systemd/system/gethome-*.path
   $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
   $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
@@ -461,7 +461,7 @@ cmd_uninstall() {
     /usr/local/lib/gethome-wifi-keepalive.sh /usr/local/lib/gethome-wifi-credentials.sh \
     /usr/local/lib/gethome-wifi-profile.sh /usr/local/lib/gethome-wifi-networks.sh \
     /usr/local/lib/gethome-wifi-watchdog.sh /usr/local/lib/gethome-update.sh \
-    /usr/local/lib/gethome-matter-ipv6.sh
+    /usr/local/lib/gethome-matter-ipv6.sh /usr/local/lib/gethome-mqtt-accounts.sh
   # The keep-alive's memory of who is on the network, and its watchdog's of
   # when somebody last answered. They are in /run, so a reboot takes them
   # anyway; an uninstall should not have to wait for one.

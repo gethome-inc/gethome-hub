@@ -479,3 +479,29 @@ there, because those reach the routes as well. `docs/api.md` and
   `gethome_` and 43 base-62 characters (`crypto.ts`) — letters and digits so it
   copies whole from a terminal, and fixed-length so a string of that shape is a
   gethome key and nothing else — and only its sha256 is ever stored.
+- **A device's broker account is the whole list, written down, and never a
+  password** (`src/core/mqtt-device-accounts.ts`; `deploy/CLAUDE.md` has the
+  root half). Six things to keep. **The id is the username**, because that is
+  what lets two static `pattern … %u` lines in the ACL confine every account
+  with no rule per device — so the id pattern here must stay the adapter's
+  `DEVICE_ID_PATTERN` (written out, since `core/` imports no adapter;
+  `test/mqtt-device-accounts.test.ts` holds them together), and neither of the
+  broker's own two names may ever be a device. **The hub hashes** — the row
+  holds the line mosquitto's password file holds (`$7$`, PBKDF2-SHA512), so
+  nothing that crosses to root is a secret and the installer can put every
+  account back from the list alone. **Every change rewrites the whole list
+  under a new revision and asks for it to be applied**, list first (renamed
+  into place) and request second (written in place, which is what
+  `PathModified` is sure to notice): a missed request is healed by the next
+  one, and there is no "add" or "remove" for the two sides to disagree about.
+  **A mint the root script refuses is undone** — the row goes, or the one it
+  replaced comes back — because an account the broker never learnt of is a
+  password that can never sign in. **A removed device's row goes at once and
+  the broker is told `REVOKE_SETTLE_MS` later**, so a board listening to its
+  own config topic hears that it was removed before its connection is
+  dropped; `reconcile()` at start is what covers a restart inside that wait,
+  and it asks only when the table and what was last applied differ. And **the
+  service follows `deviceRemoved` itself** (the `FavoritesService`
+  arrangement), which is why that event now carries what the device was on
+  its own protocol: the row has gone by then, and an account is filed under
+  the protocol's id, not the hub's.

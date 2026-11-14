@@ -66,13 +66,17 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     key: 'device.add',
     group: 'Devices',
     title: 'Add devices',
-    summary: 'Pair a Matter accessory, or open the Zigbee network so a new device can join.',
+    summary:
+      'Pair a Matter accessory, open the Zigbee network so a new device can join, or give a ' +
+      'board you are setting up its own account on the MQTT broker.',
   },
   {
     key: 'device.remove',
     group: 'Devices',
     title: 'Remove devices',
-    summary: 'Take a device out of the home and unpair it. Nothing in the apps undoes this.',
+    summary:
+      'Take a device out of the home and unpair it, or take away the MQTT account a board ' +
+      'holds. Nothing in the apps undoes this.',
   },
   {
     key: 'camera.view',

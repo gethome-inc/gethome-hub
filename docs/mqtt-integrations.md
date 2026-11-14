@@ -39,6 +39,42 @@ the [REST API](api.md), which works for every protocol rather than just Zigbee.
 The connection is unencrypted. That is right for a home LAN and wrong for the
 internet: don't forward 1883 through your router.
 
+### A device's own account
+
+`gethome` is one password for everything you wire in, which is what you want
+on a bench. A hub can also give **one device an account of its own**, and an
+app that sets a device up for you asks for one when the hub offers it
+(`mqtt.deviceAccounts` on `GET /hub`,
+[`api.md`](api.md#a-broker-account-for-each-device-mqttdevice-accounts)):
+
+```
+username: <deviceId>                (the id in the device's own topics)
+password: ...                       (shown once, when the account is made)
+```
+
+Nothing about the convention below changes for a device that holds one. What
+changes is its reach:
+
+- **It reads and writes its own topics and nothing else** —
+  `gethome/device/<deviceId>/…` and `gethome/discovery/<deviceId>/…`. Not
+  another device's state, discovery document or commands; not the rest of
+  `gethome/`; nothing under `zigbee2mqtt/`, reading included.
+- **A project's topics only if it was given the project's key** when the
+  account was made, and then only that project's
+  ([below](#a-projects-own-topics-gethomeprojectkey)).
+- **It ends with the device.** Deleting the device in an app takes the account
+  away and the broker drops the connection, so the device cannot come back —
+  not even one that was switched off when it was deleted. It gets a new
+  account by being set up again.
+- **Sign in under a client id made of letters, digits, `-`, `_` and `.`** —
+  your device id is the obvious one. A client whose id has `+` or `#` in it
+  is refused everything such an account is allowed.
+
+A device that holds its own account and one that holds `gethome` are the same
+device to the hub and to the apps; nothing you publish says which it is. The
+shared account goes on working, with its password unchanged, for everything
+that already has it.
+
 > **MQTT or the API?** This convention is for a thing that **is** a device — a
 > board with a relay on it, a sensor, a bridge that presents other hardware as
 > devices. Software that **uses** the home — a dashboard, a script that switches
@@ -79,9 +115,11 @@ device doesn't come back on the hub's next boot. A device that subscribes to
 its own config topic hears that as a live empty message — its cue to stop
 announcing itself until it is set up again, rather than putting itself straight
 back. Its own retained config arriving on that subscription is not a deletion.
-(A device that is switched off at that moment misses it, and comes back when it
-is switched on: an empty retained message leaves nothing behind for it to hear
-later.)
+(A device that is switched off at that moment misses it, and an empty retained
+message leaves nothing behind for it to hear later. One that holds the shared
+`gethome` account therefore comes back when it is switched on. One that holds
+[an account of its own](#a-devices-own-account) does not: the account went
+with the device, and the broker refuses it.)
 
 ### A project's own topics (`gethome/project/<key>/…`)
 
@@ -109,6 +147,13 @@ a secret there** — a password, an API key, a token — and never retain one: a
 retained message is handed to every client that subscribes later, for as long
 as the broker keeps it. Retain only what a part that connects later needs at
 once, and clear it with an empty retained message when the project goes.
+
+A part that holds [an account of its own](#a-devices-own-account) is narrower:
+it reaches the topics of the one project whose key it was given, and no other
+project's — and none at all if it was given no key. That keeps the parts of one
+project from reading or driving another's. It still is not a lock, for the
+reason above: whatever holds the shared `gethome` password reaches every
+project's topics as it always did.
 
 ## Staying online
 
@@ -342,3 +387,7 @@ an API key instead ([MQTT or the API?](#connecting)).
 - The broker is LAN-internal; don't expose 1883 to the internet. It asks for
   the credentials in [Connecting](#connecting) — set your MQTT client's
   username and password, not just its host.
+- A device that holds [an account of its own](#a-devices-own-account) can
+  publish and subscribe under its own id only. If it must watch another device
+  or a Zigbee sensor, it is not a device on this convention any more but
+  software using the home, and wants an [API key](api.md#api-keys).

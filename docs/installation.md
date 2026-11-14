@@ -101,13 +101,15 @@ sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
 sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
 sudo gethome-hubctl pairing-code    # the code, until the hub is claimed
-sudo gethome-hubctl mqtt            # the broker's two accounts (--rotate to change them)
+sudo gethome-hubctl mqtt            # the broker's two shared accounts (--rotate to change them)
 ```
 
 The API answers at `http://<hub>:8420/api/v1/hub`, and the MQTT broker at
 `mqtt://<hub>:1883` for devices on the same network. The broker asks for a
-username and password, and there are two accounts — which one to use for your
-own devices, and why, is in [`mqtt-integrations.md`](mqtt-integrations.md#connecting).
+username and password, and there are two shared accounts — which one to use for
+your own devices, and why, is in [`mqtt-integrations.md`](mqtt-integrations.md#connecting).
+A device set up from an app may hold an account of its own instead; rotating
+the shared two leaves those alone.
 Neither port should ever be forwarded through your router
 ([`security.md`](security.md)).
 

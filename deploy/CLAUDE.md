@@ -370,13 +370,82 @@ in `deploy/install.sh` must stay accurate.
   argument that the person standing in the house is the one who needs them.
   That argument does not reach a broker password: it is a front-door key
   rather than a spending decision, and it is the one thing here that outlives
-  the token it was read with. And **`test/deploy-mqtt-acl.test.ts` runs a real broker on the
+  the token it was read with. **A device's own account is the other answer to
+  that question** (the bullet after this one): it reaches one device's topics
+  and it *can* be taken back, so making one is `device.add` and needs neither
+  of these keys. And **`test/deploy-mqtt-acl.test.ts` runs a real broker on the
   config `install.sh` writes** and tries the attacks, because four `topic read`
   lines prove nothing about what mosquitto does with them; it also adopts a
   device published with the limited account, since an ACL tight enough to stop
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **A device can hold a broker account of its own, and the hub records the
+  list the way it records a radio.** The two accounts above are shared: every
+  board somebody set up held `gethome`, so any of them could publish another
+  device's state, discovery or commands, and one that was switched off while
+  it was deleted came back when it was switched on — the hub clears its
+  retained topics, which leaves nothing for it to hear, and its password still
+  worked. Now `POST /mqtt/device-accounts` gives one device an account named
+  for it (`src/core/mqtt-device-accounts.ts`), and `deploy/mqtt-accounts.sh`
+  (installed as `/usr/local/lib/gethome-mqtt-accounts.sh`, root, `Type=oneshot`,
+  started by `gethome-mqtt-accounts.path` on `<data>/mqtt-accounts/request`)
+  makes mosquitto's two files say so. Eleven things to keep.
+  **The ACL's device lines are static**: `pattern readwrite gethome/device/%u/#`
+  and the same for `discovery`, where mosquitto substitutes the name a client
+  signed in with. So an account's id *is* its username, there is no rule to
+  write per device, and what was measured against mosquitto 2.0.18 holds: a
+  device account reaches its own topics and nothing else, a client id is never
+  consulted (a board signed in as itself under another's client id publishes
+  nothing), and a client whose id carries `+` or `#` is refused everything a
+  pattern would have given it — which never touches the two shared accounts,
+  whose `user` rules are read first. **Only a project's line is generated**
+  (`user <id>` / `topic readwrite gethome/project/<key>/#`), below the
+  `# gethome:device-accounts` line the installer's ACL ends on; the script
+  keeps everything down to that line as it finds it, and an ACL without it is
+  one it refuses to touch. **Still only `read`/`write`/`readwrite`.**
+  **The hub hashes, so no password crosses to root**: the list carries
+  `$7$…` lines, PBKDF2-SHA512 exactly as `mosquitto_passwd` writes them, and
+  the script copies them in. That is also why `enabled` is written only where
+  the broker's *own* tool just wrote a `$7$` line for the hub's account — a
+  broker that stores passwords another way is one the hub cannot write a line
+  for, and there device accounts are simply not offered. **The whole list,
+  every time**: the password file is rebuilt as the broker's own two lines,
+  copied untouched, plus every account on the list, so a run is repeatable, a
+  missed one is healed by the next, and nothing is ever "added" or "removed".
+  **`install.sh` runs the same script between writing the password file
+  afresh and restarting the broker** (`--no-reload`), because
+  `mosquitto_passwd -c` begins that file again on every update and a board
+  must never be refused because its hub was updated; it takes the hub's
+  `result` away first, so a run that could not happen is asked for again when
+  the hub starts. **Never lock the hub out of its own broker**: nothing is
+  written unless the hub's own account is among the lines being kept, a device
+  may not be called what either shared account is called, every line of the
+  list is checked for exactly its shape before it is used (the list is the hub
+  user's file and this is root — and Raspberry Pi OS's `awk` is mawk, so the
+  checks use no interval expressions), and each file is written beside its
+  name, given `root:mosquitto` 0640 *first*, and renamed into place. **A list
+  that is there and does not read as one is refused, never read as empty** —
+  read as "no accounts" it would take every device's away. **Reload, not
+  restart**: `systemctl reload mosquitto` is a SIGHUP, on which mosquitto
+  re-reads both files and re-checks every connected client, dropping the ones
+  that no longer sign in — that is what ends a deleted device's connection,
+  and it leaves the hub's and Zigbee2MQTT's alone. Skipped when nothing
+  changed. **Everything under `<data>/mqtt-accounts/` is read and written as
+  the hub's account** (`as_hub`, the Wi-Fi bullet's rule), the script
+  **always exits 0**, the service is **never enabled**, and it carries
+  `StartLimitIntervalSec=0` in `[Unit]` because five boards set up inside ten
+  seconds would otherwise park it — and the path unit with it — while a
+  device deleted after that kept its account. And **the shared accounts are
+  untouched**: same names, same passwords, same ACL lines, so everything that
+  held `gethome` before goes on working, and `gethome-hubctl mqtt --rotate`
+  now changes those two without stranding a device that holds its own.
+  `test/deploy-mqtt-acl.test.ts` runs the real script against a real broker —
+  confinement, the hub's own hash signing in, revocation dropping a live
+  connection, a replaced password, and the installer writing both files
+  afresh; `test/mqtt-device-accounts.test.ts` asks the script the hostile
+  questions without one; `test/deploy-config.test.ts` pins the installer's
+  half. `docs/api.md` is canonical for the routes.
 - **Zigbee and Wi-Fi are one band, and upstream's default channel is inside the
   commonest Wi-Fi channel there is.** 802.15.4 channels 11–26 are 2 MHz wide and
   5 MHz apart from 2405 MHz, a 20 MHz Wi-Fi channel is its centre ±11 MHz, so

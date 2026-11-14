@@ -24,6 +24,39 @@ pairing. The hub's other, full-access account is not for devices.
 needs the new one. A hub installed before passwords existed accepted anonymous
 connections, and updating it closed the broker.
 
+### A device's own account
+
+A hub can give one device an account of its own instead, and an app that sets
+a device up may hand the person one. You recognise it by its username, which
+is **the device's id** rather than `gethome`:
+
+| | |
+|---|---|
+| Username | the device's `<deviceId>` — use exactly this id in every topic |
+| Password | shown once, by the app that made the account |
+| May publish and subscribe | `gethome/device/<deviceId>/#` and `gethome/discovery/<deviceId>/#` |
+| A project's topics | only `gethome/project/<key>/#` for the one key the account was made with, if any |
+| Nothing else | not another device's topics, not the rest of `gethome/`, nothing under `zigbee2mqtt/` — reading included |
+
+Everything else in this file is the same for such a device. What to know when
+writing for one:
+
+- **A publish outside those topics is dropped silently.** MQTT gives the
+  publisher no error, so a wrong `deviceId` looks like a hub that ignores you.
+  The id in your topics must be the username, character for character.
+- **Use a client id of letters, digits, `-`, `_` and `.`** — the device id is
+  the obvious choice. The broker refuses a client whose id contains `+` or `#`
+  everything such an account is allowed. A second connection from the same
+  program needs a client id of its own, as always.
+- **The account ends when the device is deleted in an app**, and the broker
+  drops the connection. After that the broker answers a connection attempt
+  "not authorised" until the device is set up again with a new account; treat
+  that as having been removed, and back off rather than retrying fast.
+- **Being set up again replaces the password.** The old one stops working at
+  once.
+- No API key can make, list or end one of these accounts; that is done by a
+  person, in an app, with the right to add devices.
+
 ## Topics
 
 `<deviceId>` matches `[A-Za-z0-9_-]{1,64}`. A topic with any other id is
@@ -62,7 +95,9 @@ flashed at different times stop finding each other. It is **not a security
 boundary**: every board and program signed in with the `gethome` account can
 read and write it. Never put a secret there — no password, key or token — and
 never retain one, since a retained message goes to every client that
-subscribes afterwards.
+subscribes afterwards. A part signed in with
+[its own account](#a-devices-own-account) reaches only the project whose key
+that account was made with, and no project at all if it was made with none.
 
 ## What the hub does with each message
 

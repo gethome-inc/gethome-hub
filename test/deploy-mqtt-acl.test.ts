@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,16 @@ import type { AdapterBus } from '../src/adapters/adapter.js';
 import type { EndpointState } from '../src/schema/index.js';
 import { brokerCredentials } from '../src/mqtt-auth.js';
 import { loadConfig } from '../src/config.js';
+import { HubEventBus } from '../src/core/bus.js';
+import { MqttDeviceAccounts } from '../src/core/mqtt-device-accounts.js';
+import { members } from '../src/db/schema.js';
+import { openTestDb, type TestDb } from './helpers/db.js';
+import {
+  installerAcl,
+  runAccountsScript,
+  watchForAccountRequests,
+  type BrokerMachine,
+} from './helpers/mqtt-accounts.js';
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installer = readFileSync(path.join(repoRoot, 'deploy', 'install.sh'), 'utf8');
@@ -78,6 +88,15 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
   let port = 0;
   let process: ChildProcess | undefined;
   const clients: mqtt.MqttClient[] = [];
+  // The hub's half of a device's own account, on this same broker: a real
+  // table, the real service, and the real root script standing where the
+  // path unit would start it.
+  let machine: BrokerMachine;
+  let store: TestDb | null = null;
+  let events: HubEventBus;
+  let accounts: MqttDeviceAccounts;
+  let stopWatching: (() => void) | undefined;
+  let anna: { id: string; name: string };
 
   beforeAll(async () => {
     dir = mkdtempSync(path.join(tmpdir(), 'gethome-acl-'));
@@ -119,16 +138,58 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
     // machine fails the same way until it is unloaded there too.
     process = spawn(broker!, ['-c', path.join(dir, 'mosquitto.conf')], { stdio: 'ignore' });
     expect(await listening(port), 'the test broker never came up').toBe(true);
+
+    // What `install.sh` leaves beside all that for device accounts: the data
+    // directory the hub writes its list into, and the file that says this
+    // machine applies it.
+    const conf = path.join(dir, 'conf');
+    const data = path.join(dir, 'data');
+    mkdirSync(conf);
+    mkdirSync(path.join(data, 'mqtt-accounts'), { recursive: true });
+    writeFileSync(path.join(conf, 'hub.env'), `DATA_DIR=${data}\n`);
+    writeFileSync(path.join(data, 'mqtt-accounts', 'enabled'), '');
+    machine = {
+      conf,
+      data,
+      etc: dir,
+      passwd: path.join(dir, 'gethome.passwd'),
+      acl: path.join(dir, 'gethome.acl'),
+    };
+    store = await openTestDb();
+    const [row] = await store!.db.insert(members).values({ name: 'Anna', role: 'owner' }).returning();
+    anna = { id: row!.id, name: row!.name };
+    events = new HubEventBus();
+    accounts = new MqttDeviceAccounts({
+      db: store!.db,
+      dataDir: data,
+      events,
+      reserved: ['gethome-hub', 'gethome'],
+      log: pino({ level: 'silent' }),
+      applyWaitMs: 10_000,
+      // No wait before the broker is told: what is being timed here is the
+      // broker, and the wait has its own test beside the service.
+      revokeSettleMs: 0,
+    });
+    // The script tells this broker to read its files again, the way
+    // `systemctl reload mosquitto` tells the one on a hub.
+    stopWatching = watchForAccountRequests(machine, { GETHOME_MQTT_BROKER_PID: String(process.pid) });
   }, 30_000);
 
   afterAll(async () => {
+    stopWatching?.();
+    accounts?.stop();
     for (const client of clients) await client.endAsync(true).catch(() => undefined);
     process?.kill();
+    await store?.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
   /** `reconnectPeriod: 0` so a refusal rejects instead of retrying forever. */
-  async function connect(username?: string, password?: string): Promise<mqtt.MqttClient> {
+  async function connect(
+    username?: string,
+    password?: string,
+    clientId?: string,
+  ): Promise<mqtt.MqttClient> {
     const client = await mqtt.connectAsync(`mqtt://127.0.0.1:${port}`, {
       reconnectPeriod: 0,
       connectTimeout: 5000,
@@ -136,6 +197,7 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
       // same as an absent one, and mqtt.js reads whether the key is there.
       ...(username !== undefined ? { username } : {}),
       ...(password !== undefined ? { password } : {}),
+      ...(clientId !== undefined ? { clientId } : {}),
     });
     clients.push(client);
     return client;
@@ -147,8 +209,12 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
     publish: () => Promise<void>,
   ): Promise<string[]> {
     const seen: string[] = [];
-    const collect = (topic: string): void => {
-      seen.push(topic);
+    // Only what was published while watching. A message the broker held as
+    // retained is handed over on subscribing, with its retain flag set, and
+    // says nothing about who may publish now — an earlier test's discovery
+    // document would otherwise turn up in every wildcard subscription.
+    const collect = (topic: string, _payload: Buffer, packet: { retain?: boolean }): void => {
+      if (packet.retain !== true) seen.push(topic);
     };
     watcher.on('message', collect);
     await publish();
@@ -320,5 +386,321 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
     expect(seen).not.toContain('zigbee2mqtt/bridge/info');
     expect(seen).not.toContain('zigbee2mqtt/bridge/logging');
     await integration.unsubscribeAsync('#');
+  });
+
+  /**
+   * **A device that holds an account of its own.**
+   *
+   * The claim is the roadmap's, and it is the broker's to keep: a board is
+   * confined to its own topics, and deleting it ends its account — the live
+   * connection included. Both are properties of two files as mosquitto reads
+   * them, so both are asked of mosquitto: the hub's own service mints the
+   * account, the real `deploy/mqtt-accounts.sh` writes the files and has this
+   * broker read them again, and a client then tries what a board that had
+   * been lost, resold or flashed by somebody else would try.
+   *
+   * A device signs in with its id as its client id as well as its username,
+   * which is what a device on the convention ordinarily does.
+   */
+  describe('a device with an account of its own', () => {
+    /** Mint an account the way the route does, and hand back its password. */
+    async function account(deviceId: string, projectKey?: string): Promise<string> {
+      const outcome = await accounts.mint({ deviceId, projectKey, member: anna });
+      if (!outcome.ok) throw new Error(`the hub refused ${deviceId}: ${outcome.reason}`);
+      expect(outcome.state, 'the broker never took the new list').toBe('applied');
+      return outcome.password;
+    }
+
+    /** Resolves once the broker has hung up on `client`. */
+    function hungUp(client: mqtt.MqttClient): Promise<void> {
+      return new Promise((resolve) => {
+        if (!client.connected) resolve();
+        else client.once('close', () => resolve());
+      });
+    }
+
+    async function within<T>(label: string, promise: Promise<T>, ms = 5000): Promise<T> {
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), ms);
+      });
+      try {
+        return await Promise.race([promise, late]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    it('signs in with a password the hub hashed itself, and is adopted', async () => {
+      // The hub never hands root a password: it writes the line mosquitto's
+      // password file holds. This is where that line meets a real broker.
+      const password = await account('desk-light-x7k2q9');
+
+      const adopted: string[] = [];
+      const bus = {
+        deviceUpserted: (descriptor: { externalId: string }) => adopted.push(descriptor.externalId),
+        deviceRemoved: () => {},
+        stateChanged: () => {},
+        reachabilityChanged: () => {},
+        radioReachabilityChanged: () => {},
+        commandFailed: () => {},
+        activity: () => {},
+      } as unknown as AdapterBus;
+      const adapter = new MqttAdapter({
+        mqttUrl: `mqtt://127.0.0.1:${port}`,
+        ...brokerCredentials({ username: 'gethome-hub', password: HUB_PASSWORD }),
+        log: pino({ level: 'silent' }),
+      });
+      await adapter.start(bus);
+
+      const board = await connect('desk-light-x7k2q9', password, 'desk-light-x7k2q9');
+      const heard: string[] = [];
+      await board.subscribeAsync('gethome/device/desk-light-x7k2q9/set');
+      await board.subscribeAsync('gethome/discovery/desk-light-x7k2q9/config');
+      board.on('message', (topic) => heard.push(topic));
+      await board.publishAsync(
+        'gethome/discovery/desk-light-x7k2q9/config',
+        JSON.stringify({
+          name: 'Desk light',
+          endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'], primary: 'onOff' }],
+        }),
+        { retain: true },
+      );
+      await board.publishAsync('gethome/device/desk-light-x7k2q9/availability', 'online', { retain: true });
+      await board.publishAsync('gethome/device/desk-light-x7k2q9/state', JSON.stringify({ onOff: true }));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(adopted).toContain('desk-light-x7k2q9');
+
+      // The hub can still work it, and it hears its own config topic — which
+      // is how it learns it was deleted.
+      await adapter.execute('desk-light-x7k2q9', 1, { type: 'power', on: false });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(heard).toContain('gethome/device/desk-light-x7k2q9/set');
+      expect(heard).toContain('gethome/discovery/desk-light-x7k2q9/config');
+
+      await adapter.stop();
+      // Leave nothing retained for the tests after this one.
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      await hub.publishAsync('gethome/discovery/desk-light-x7k2q9/config', '', { retain: true });
+      await hub.publishAsync('gethome/device/desk-light-x7k2q9/availability', '', { retain: true });
+    }, 20_000);
+
+    it('cannot write anywhere but its own topics', async () => {
+      const password = await account('desk-light-x7k2q9');
+      await account('porch-cam-aa11bb');
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const board = await connect('desk-light-x7k2q9', password, 'desk-light-x7k2q9');
+      await hub.subscribeAsync('#');
+
+      const own = [
+        'gethome/discovery/desk-light-x7k2q9/config',
+        'gethome/device/desk-light-x7k2q9/state',
+        'gethome/device/desk-light-x7k2q9/state/2',
+        'gethome/device/desk-light-x7k2q9/availability',
+        'gethome/device/desk-light-x7k2q9/heartbeat',
+        'gethome/device/desk-light-x7k2q9/camera',
+        'gethome/device/desk-light-x7k2q9/log',
+      ];
+      const seen = await delivered(hub, async () => {
+        for (const topic of own) await board.publishAsync(topic, 'x');
+        for (const topic of [
+          // Another device: its state, its discovery document, its commands.
+          'gethome/device/porch-cam-aa11bb/state',
+          'gethome/discovery/porch-cam-aa11bb/config',
+          'gethome/device/porch-cam-aa11bb/set',
+          // A device nobody has made yet — which the shared account could
+          // announce into the home.
+          'gethome/discovery/invented/config',
+          // A name that only begins like its own.
+          'gethome/device/desk-light-x7k2q9x/state',
+          'gethome/device/desk-light/state',
+          // The rest of the tree, and the home.
+          'gethome/project/9f3a11c2/frames',
+          'gethome/anything',
+          'zigbee2mqtt/lamp/set',
+          'zigbee2mqtt/front-door-lock/set',
+          'zigbee2mqtt/bridge/request/permit_join',
+        ]) {
+          await board.publishAsync(topic, 'x');
+        }
+      });
+
+      expect(seen.sort()).toEqual([...own].sort());
+      await hub.unsubscribeAsync('#');
+    });
+
+    it('cannot read anywhere but its own topics', async () => {
+      const password = await account('desk-light-x7k2q9');
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const board = await connect('desk-light-x7k2q9', password, 'desk-light-x7k2q9');
+      // A wildcard covering everything, so what arrives is the broker's
+      // choice rather than a subscription written to match the answer.
+      await board.subscribeAsync('#');
+
+      const seen = await delivered(board, async () => {
+        for (const topic of [
+          'gethome/device/desk-light-x7k2q9/set',
+          'gethome/discovery/desk-light-x7k2q9/config',
+          'gethome/device/porch-cam-aa11bb/set',
+          'gethome/device/porch-cam-aa11bb/state',
+          'gethome/device/porch-cam-aa11bb/camera',
+          'gethome/discovery/porch-cam-aa11bb/config',
+          'gethome/project/9f3a11c2/frames',
+          // What the shared account may watch, and this one may not: it is a
+          // board's account, not an integration's.
+          'zigbee2mqtt/motion-sensor',
+          'zigbee2mqtt/bridge/devices',
+          'zigbee2mqtt/bridge/info',
+        ]) {
+          await hub.publishAsync(topic, `payload for ${topic}`);
+        }
+      });
+
+      expect(seen.sort()).toEqual([
+        'gethome/device/desk-light-x7k2q9/set',
+        'gethome/discovery/desk-light-x7k2q9/config',
+      ]);
+      await board.unsubscribeAsync('#');
+    });
+
+    it('reaches its own project’s topics and no other project’s', async () => {
+      const reader = await account('plate-reader-cd34ef', '9f3a11c2');
+      const other = await account('door-bell-gh56ij', '0b0b0b0b');
+      const none = await account('desk-light-x7k2q9');
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      // A service opens a connection of its own for these, under a client id
+      // that is not its device id — the device library holds that one.
+      const part = await connect('plate-reader-cd34ef', reader, 'plate-reader-cd34ef-project');
+      const stranger = await connect('door-bell-gh56ij', other, 'door-bell-gh56ij');
+      const loner = await connect('desk-light-x7k2q9', none, 'desk-light-x7k2q9');
+      await hub.subscribeAsync('#');
+      await part.subscribeAsync('#');
+
+      const written = await delivered(hub, async () => {
+        await part.publishAsync('gethome/project/9f3a11c2/frames', 'mine');
+        await part.publishAsync('gethome/project/0b0b0b0b/ring', 'not mine');
+        await stranger.publishAsync('gethome/project/9f3a11c2/frames', 'not theirs');
+        await loner.publishAsync('gethome/project/9f3a11c2/frames', 'no project at all');
+      });
+      // One arrival, and it is the part's own.
+      expect(written).toEqual(['gethome/project/9f3a11c2/frames']);
+
+      const read = await delivered(part, async () => {
+        await hub.publishAsync('gethome/project/9f3a11c2/answer', 'for the part');
+        await hub.publishAsync('gethome/project/0b0b0b0b/ring', 'for the other project');
+      });
+      expect(read).toEqual(['gethome/project/9f3a11c2/answer']);
+      await hub.unsubscribeAsync('#');
+      await part.unsubscribeAsync('#');
+    });
+
+    it('cannot pass for another device by signing in under its client id', async () => {
+      // The ACL substitutes the name a client *signed in* with. A client id is
+      // whatever the client says it is, so nothing may hang on it.
+      const password = await account('desk-light-x7k2q9');
+      await account('porch-cam-aa11bb');
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const impostor = await connect('desk-light-x7k2q9', password, 'porch-cam-aa11bb');
+      await hub.subscribeAsync('#');
+      const seen = await delivered(hub, async () => {
+        await impostor.publishAsync('gethome/device/porch-cam-aa11bb/state', '{"onOff":true}');
+        await impostor.publishAsync('gethome/discovery/porch-cam-aa11bb/config', '');
+      });
+      expect(seen).toEqual([]);
+      await hub.unsubscribeAsync('#');
+    });
+
+    it('is cut off the moment its device is removed, and cannot come back', async () => {
+      const password = await account('desk-light-x7k2q9');
+      const kept = await account('porch-cam-aa11bb');
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const integration = await connect('gethome', APP_PASSWORD);
+      const board = await connect('desk-light-x7k2q9', password, 'desk-light-x7k2q9');
+      const neighbour = await connect('porch-cam-aa11bb', kept, 'porch-cam-aa11bb');
+
+      // The registry's own event, as it emits it when a device leaves the
+      // home — deleted in an app, or withdrawn by the device itself.
+      const gone = hungUp(board);
+      events.emit('deviceRemoved', 'hub-device-id', { adapter: 'mqtt', externalId: 'desk-light-x7k2q9' });
+      await within('the broker to hang up on the removed device', gone);
+
+      // The board that was switched off while it was deleted, switched on
+      // again: this is the one that used to come straight back.
+      await expect(connect('desk-light-x7k2q9', password, 'desk-light-x7k2q9')).rejects.toThrow();
+
+      // Nobody else was disturbed by the broker reading its files again.
+      expect(hub.connected).toBe(true);
+      expect(integration.connected).toBe(true);
+      expect(neighbour.connected).toBe(true);
+      await hub.subscribeAsync('gethome/device/porch-cam-aa11bb/state');
+      const seen = await delivered(hub, async () => {
+        await neighbour.publishAsync('gethome/device/porch-cam-aa11bb/state', '{"onOff":true}');
+      });
+      expect(seen).toEqual(['gethome/device/porch-cam-aa11bb/state']);
+    }, 20_000);
+
+    it('ends the old password when the device is set up again', async () => {
+      const first = await account('desk-light-x7k2q9');
+      const board = await connect('desk-light-x7k2q9', first, 'desk-light-x7k2q9');
+      const gone = hungUp(board);
+
+      const second = await account('desk-light-x7k2q9');
+      expect(second).not.toBe(first);
+      await within('the broker to hang up on the old password', gone);
+      await expect(connect('desk-light-x7k2q9', first, 'desk-light-x7k2q9')).rejects.toThrow();
+      const again = await connect('desk-light-x7k2q9', second, 'desk-light-x7k2q9');
+      expect(again.connected).toBe(true);
+    }, 20_000);
+
+    it('keeps its account when the installer writes both files afresh', async () => {
+      // An update is `install.sh` again: the password file begins again with
+      // the broker's own two accounts and the ACL is written whole, and then
+      // the broker is restarted. The script runs in between, from the hub's
+      // list — or every board in the home would be refused after an update.
+      const password = await account('plate-reader-cd34ef', '9f3a11c2');
+      execFileSync(passwdTool!, ['-c', '-b', machine.passwd, 'gethome-hub', HUB_PASSWORD]);
+      execFileSync(passwdTool!, ['-b', machine.passwd, 'gethome', APP_PASSWORD]);
+      writeFileSync(machine.acl, `${installerAcl()}\n`);
+      expect(readFileSync(machine.passwd, 'utf8')).not.toContain('plate-reader-cd34ef');
+
+      expect(runAccountsScript(machine, ['--no-reload'])).toBe(0);
+      // Stands in for the installer's restart: the broker reads what is there.
+      process!.kill('SIGHUP');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const part = await connect('plate-reader-cd34ef', password, 'plate-reader-cd34ef');
+      await hub.subscribeAsync('gethome/#');
+      const seen = await delivered(hub, async () => {
+        await part.publishAsync('gethome/device/plate-reader-cd34ef/state', '{}');
+        await part.publishAsync('gethome/project/9f3a11c2/frames', 'x');
+      });
+      expect(seen.sort()).toEqual([
+        'gethome/device/plate-reader-cd34ef/state',
+        'gethome/project/9f3a11c2/frames',
+      ]);
+      await hub.unsubscribeAsync('gethome/#');
+    }, 20_000);
+
+    it('leaves the shared account exactly what it was', async () => {
+      // Boards already in homes hold it, and nobody is going to flash them
+      // again: after everything above, it still owns `gethome/` and can
+      // still only watch Zigbee.
+      const hub = await connect('gethome-hub', HUB_PASSWORD);
+      const integration = await connect('gethome', APP_PASSWORD);
+      await hub.subscribeAsync('#');
+      const seen = await delivered(hub, async () => {
+        await integration.publishAsync('gethome/discovery/pool-pump/config', '');
+        await integration.publishAsync('gethome/device/pool-pump/state', '{"onOff":true}');
+        await integration.publishAsync('gethome/project/9f3a11c2/frames', 'x');
+        await integration.publishAsync('zigbee2mqtt/lamp/set', '{"state":"OFF"}');
+      });
+      expect(seen.sort()).toEqual([
+        'gethome/device/pool-pump/state',
+        'gethome/discovery/pool-pump/config',
+        'gethome/project/9f3a11c2/frames',
+      ]);
+      await hub.unsubscribeAsync('#');
+    });
   });
 });

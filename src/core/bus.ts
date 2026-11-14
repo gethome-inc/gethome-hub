@@ -16,7 +16,14 @@ import type { CommissionFailure } from '../adapters/matter/commission-failures.j
  */
 export interface HubEvents {
   deviceUpserted: [deviceId: string];
-  deviceRemoved: [deviceId: string];
+  /**
+   * A device left the home. The second argument says what it was on its own
+   * protocol — by the time this fires the row has gone, and a listener that
+   * holds something under the protocol's id rather than the hub's (a broker
+   * account, for one) has no other way to find it. Optional, so a listener
+   * that only wants the id reads it as it always did.
+   */
+  deviceRemoved: [deviceId: string, device?: { adapter: AdapterId; externalId: string }];
   stateChanged: [deviceId: string, endpointId: number, state: EndpointState];
   /**
    * Rooms or zones changed — the whole of both lists, not a diff.
