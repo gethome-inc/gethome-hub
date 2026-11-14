@@ -38,12 +38,27 @@ class FakeAdapter implements ProtocolAdapter {
   readonly id = 'mqtt' as const;
   bus: AdapterBus | null = null;
   executed: Array<{ externalId: string; endpointId: number; command: HubCommand }> = [];
+  forgotten: string[] = [];
+  /** What every `forget` waits on — a radio still being asked, until released. */
+  private holding: Promise<void> = Promise.resolve();
   async start(bus: AdapterBus) {
     this.bus = bus;
   }
   async stop() {}
   async execute(externalId: string, endpointId: number, command: HubCommand) {
     this.executed.push({ externalId, endpointId, command });
+  }
+  async forget(externalId: string) {
+    this.forgotten.push(externalId);
+    await this.holding;
+  }
+  /** Hold every `forget` open, the way a device that has to be asked and then forced does; returns the release. */
+  holdForgets(): () => void {
+    let release = () => {};
+    this.holding = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
   }
 }
 
@@ -154,6 +169,12 @@ describe.skipIf(!handle)('hub API', () => {
       // invite — which adds the duplicate person the whole feature exists to
       // stop, with nothing on the way back to say so.
       pairing: { signInCodes: true },
+      // Presence again, and both say what an app needs to know before it
+      // offers anything: the stream kinds the hub relays, how many cameras at
+      // once and how many of those one API key may open, and the kinds of
+      // panel it keeps with how big each may be.
+      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4, maxStreamsPerKey: 1 },
+      panels: { perDevice: 4, kinds: { web: { maxBytes: 512 * 1024, maxFiles: 64 } } },
     });
   });
 
@@ -344,6 +365,178 @@ describe.skipIf(!handle)('hub API', () => {
       'Georgy removed Masha from the home.',
     );
     expect(feed.find((row) => row.kind === 'member.left')?.memberId ?? null).toBeNull();
+  });
+
+  it('puts a panel on a device’s wire only when it has one, and serves it from the manifest', async () => {
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'panel-device',
+      suggestedName: 'Hall display',
+      endpoints: [{ endpointId: 1, deviceKind: 'sensor', capabilities: ['custom'], primary: 'custom' }],
+    });
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'panel-device')!;
+    const wireOf = async () =>
+      ((await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })).json() as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.id === device.id,
+      )!;
+    // Absent, not empty: every other device's wire is what it always was.
+    expect(await wireOf()).not.toHaveProperty('panels');
+
+    const html = '<!doctype html><p>Hall</p>';
+    const put = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: {
+        kind: 'web',
+        title: 'Hall',
+        height: 120,
+        files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }],
+      },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toMatchObject({ changed: true, panel: { id: 'hall', kind: 'web', title: 'Hall', height: 120 } });
+    expect((await wireOf()).panels).toEqual([expect.objectContaining({ id: 'hall', kind: 'web', title: 'Hall', height: 120 })]);
+
+    const served = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/panels/hall/files/index.html`,
+      headers: auth(memberToken),
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.body).toBe(html);
+    expect(served.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(served.headers['x-content-type-options']).toBe('nosniff');
+    expect(String(served.headers['content-security-policy'])).toContain("connect-src 'none'");
+    const again = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/panels/hall/files/index.html`,
+      headers: { ...auth(memberToken), 'if-none-match': String(served.headers.etag) },
+    });
+    expect(again.statusCode).toBe(304);
+    const missing = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/panels/hall/files/../../secret.txt`,
+      headers: auth(memberToken),
+    });
+    expect(missing.statusCode).toBe(404);
+
+    const refused = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: { kind: 'web', title: 'Hall', files: [{ path: 'app.js', dataBase64: Buffer.from('x').toString('base64') }] },
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ error: 'invalid_panel' });
+
+    // A kind this hub doesn't keep is its own refusal — the client learns the
+    // hub is older than the panel, not that it sent something malformed —
+    // and a panel with no kind at all is a malformed request.
+    const unknownKind = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: { kind: 'native', title: 'Hall', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(unknownKind.statusCode).toBe(400);
+    expect(unknownKind.json()).toMatchObject({ error: 'unsupported_panel_kind' });
+    const noKind = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: { title: 'Hall', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(noKind.statusCode).toBe(400);
+    expect((await wireOf()).panels).toEqual([expect.objectContaining({ id: 'hall', kind: 'web' })]);
+
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}/panels/hall`, headers: auth(ownerToken) }))
+        .statusCode,
+    ).toBe(204);
+    expect(await wireOf()).not.toHaveProperty('panels');
+    await registry.removeDevice(device.id);
+  });
+
+  /**
+   * A device that said it is a program — a script, a bridge or a service on a
+   * computer rather than a board. **Presence is the answer**: the key is on
+   * the wire of a device that said so and of no other, which is what keeps
+   * every board, every Zigbee and Matter device and every app from before
+   * this exactly where they were. On the route and on the socket, since a
+   * change reaches an open app as an ordinary `deviceUpserted`.
+   */
+  it('puts `program` on a device’s wire only when it said it is one, with the computer it named', async () => {
+    const board = {
+      adapter: 'mqtt' as const,
+      externalId: 'tide-table',
+      suggestedName: 'Tide table',
+      endpoints: [{ endpointId: 1, deviceKind: 'sensor' as const, capabilities: ['custom' as const], primary: 'custom' as const }],
+    };
+    adapter.bus!.deviceUpserted(board);
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'tide-table')!;
+    const wireOf = async () =>
+      ((await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })).json() as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.id === device.id,
+      )!;
+    // Absent, not null and not empty, for a device that never said so.
+    expect(await wireOf()).not.toHaveProperty('program');
+
+    const { socket, frames } = await openSocket(memberToken);
+    /** The `program` of the next `deviceUpserted` frame for this device — `'absent'` when it has no key. */
+    const nextFrame = async (after: number): Promise<unknown> => {
+      const isOurs = (frame: Record<string, unknown>) =>
+        frame.type === 'deviceUpserted' && (frame.device as { id?: string } | undefined)?.id === device.id;
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const frame = frames.slice(after).find(isOurs);
+        if (frame) {
+          const wire = frame.device as Record<string, unknown>;
+          return 'program' in wire ? wire.program : 'absent';
+        }
+        if (Date.now() > deadline) throw new Error('timed out waiting for the device’s deviceUpserted frame');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+
+    try {
+      // It says so, naming the computer.
+      let mark = frames.length;
+      adapter.bus!.deviceUpserted({ ...board, program: { host: 'nuc.local' } });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({ host: 'nuc.local' });
+      expect(await nextFrame(mark)).toEqual({ host: 'nuc.local' });
+
+      // A program on a computer it didn't name: the key with nothing in it,
+      // and no `host` at all rather than a null or an empty one.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted({ ...board, program: {} });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({});
+      expect(await nextFrame(mark)).toEqual({});
+
+      // Only what the hub reads goes out, whatever an adapter handed over.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted({
+        ...board,
+        program: { host: 'attic-pi', internal: 'not-for-the-wire' } as { host: string },
+      });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({ host: 'attic-pi' });
+      expect(await nextFrame(mark)).toEqual({ host: 'attic-pi' });
+
+      // Taken back: the device is hardware again, and every app hears it.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted(board);
+      await registry.flush();
+      expect(await wireOf()).not.toHaveProperty('program');
+      expect(await nextFrame(mark)).toBe('absent');
+    } finally {
+      socket.close();
+      await registry.removeDevice(device.id);
+    }
   });
 
   it('serves devices announced by adapters in the wire shape', async () => {
@@ -585,6 +778,52 @@ describe.skipIf(!handle)('hub API', () => {
     expect(renamed?.data?.previousName).toBe('Reading light');
     expect(moved?.data?.roomName).toBe('Study');
     expect(moved?.data?.memberName).toBeTruthy();
+  });
+
+  /**
+   * Taking a device out of the home answers once the home has let go — not
+   * once the radio has, which is seconds for a Zigbee device that has to be
+   * asked and then forced, and longer than either app waits — and, like every
+   * other change to the home's shape, says who did it.
+   */
+  it('writes down who removed a device, and answers before its radio has let go', async () => {
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'hall-lamp',
+      suggestedName: 'Hall lamp',
+      endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'], primary: 'onOff' }],
+    });
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'hall-lamp')!;
+
+    const release = adapter.holdForgets();
+    try {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/devices/${device.id}`,
+        headers: auth(ownerToken),
+      });
+      expect(response.statusCode).toBe(204);
+      // Asked, and still being asked — the answer did not wait for it.
+      expect(adapter.forgotten).toContain('hall-lamp');
+      expect(registry.getDevice(device.id)).toBeUndefined();
+    } finally {
+      release();
+    }
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; memberId?: string; data?: Record<string, unknown> }>;
+    const removed = entries.find((entry) => entry.kind === 'device.removed' && entry.data?.deviceName === 'Hall lamp');
+    expect(removed).toMatchObject({
+      message: 'Georgy removed Hall lamp.',
+      memberId: expect.any(String),
+      data: { deviceName: 'Hall lamp', memberName: 'Georgy' },
+    });
+
+    // A device that is not there is still a 404, not a quiet success.
+    const again = await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}`, headers: auth(ownerToken) });
+    expect(again.statusCode).toBe(404);
   });
 
   it('refuses a name of spaces and a room that does not exist', async () => {

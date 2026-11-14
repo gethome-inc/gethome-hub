@@ -81,6 +81,19 @@ The only connections the hub itself ever makes outward are:
   never anything about your home
   ([why only those two](ai-adaptation.md)).
 
+On your own network, the hub also fetches from **the cameras you have added**
+— and only when somebody with `camera.view` opens one in an app, or software
+holding an API key given it asks for one. The hub keeps no record of each look,
+for a person or for a key, so give a key `camera.view` only for software you
+trust with every camera in the home. It fetches only plain `http` from a
+private address on the home network that isn't the hub's own, never follows a
+redirect, sends no credentials, relays nothing but images, and only once the
+board has proved it is the device it says it is
+([`api.md`](api.md#cameras)). The pictures pass
+through and are not stored. That rule exists because a camera's address is
+announced by the device itself, over a broker account every board in the house
+shares — without it, an announcement could point the hub at your router.
+
 Installing and updating the hub also download from GitHub, nodejs.org and npm,
 and Zigbee2MQTT may ask GitHub whether your devices have new firmware. Those are
 the installer's and Zigbee2MQTT's own downloads, not the hub reporting anything
@@ -158,6 +171,14 @@ serving it, not a security boundary.
 - **Rules are data, not code.** A rule written by a person or by a model is
   interpreted by the hub and can never run arbitrary code, and a handful of
   guards hold whatever the document says — [`automations.md`](automations.md).
+- **A panel is code that runs on every phone in the house** — a card on a
+  device's page, of a kind the hub names (`web`, a few files of HTML, is the
+  only one), installed by somebody with `device.edit`. The hub refuses a kind
+  it doesn't keep and bounds what it keeps (a few hundred kilobytes of plain
+  files of known types, every path checked, served only from the stored list
+  of files with a content-security policy that allows no network), and the
+  apps run it with no network of their own and nothing but its own device's
+  controls — [`api.md`](api.md#panels).
 
 ## What the installer verifies
 

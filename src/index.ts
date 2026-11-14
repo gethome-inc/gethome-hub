@@ -10,6 +10,8 @@ import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
+import { PanelService } from './panels/store.js';
+import { CameraProxy } from './cameras/proxy.js';
 import { RoomPictureService } from './room-pictures/store.js';
 import { PhotoStore } from './photos/store.js';
 import { watchUpdateOutcomes } from './core/update.js';
@@ -149,6 +151,14 @@ async function main(): Promise<void> {
     photos,
   );
 
+  // The panels on devices' pages, the portraits' shape: files under the data
+  // directory with a row each, indexed in memory at boot because the device
+  // wire that carries them is built synchronously.
+  const panels = new PanelService(db, events, config.DATA_DIR, log.child({ module: 'panels' }));
+  await panels.load();
+  // The camera proxy keeps nothing but the streams it is relaying right now;
+  // the server closes them when it closes.
+  const cameras = new CameraProxy({ log: log.child({ module: 'cameras' }) });
   // The pictures of the home's rooms — built here rather than inside the API so
   // the photos they keep are reconciled against them at boot, below.
   const roomPictures = new RoomPictureService(
@@ -365,6 +375,8 @@ async function main(): Promise<void> {
     activity,
     history,
     portraits,
+    panels,
+    cameras,
     settings,
     home: homeService,
     hubId: secret.hubId,

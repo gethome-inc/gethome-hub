@@ -34,14 +34,35 @@ endpoint `1`.
 |---|---|---|---|
 | `gethome/discovery/<deviceId>/config` | device | **yes** | discovery document, or empty to remove |
 | `gethome/device/<deviceId>/availability` | device (and its last will) | **yes** | `online` or `offline` |
+| `gethome/device/<deviceId>/heartbeat` | device | **yes** | how often it speaks: a whole number of seconds, 10–3600, published that often; empty to withdraw |
 | `gethome/device/<deviceId>/state` | device | recommended | state patch for endpoint 1 |
 | `gethome/device/<deviceId>/state/<endpointId>` | device | recommended | state patch for that endpoint |
 | `gethome/device/<deviceId>/set` | hub | no | command for endpoint 1 |
 | `gethome/device/<deviceId>/set/<endpointId>` | hub | no | command for that endpoint |
+| `gethome/device/<deviceId>/camera` | device | **yes** | the streams a camera serves on the home's network (endpoint 1), or empty to withdraw them — [cameras.md](cameras.md) |
+| `gethome/device/<deviceId>/camera/<endpointId>` | device | **yes** | the same, for that endpoint |
+| `gethome/device/<deviceId>/program` | device | **yes** | a JSON object saying the device is a program rather than a board, and optionally on which computer: `{"host":"nuc.local"}`; empty to withdraw |
 
 The hub subscribes to `gethome/discovery/+/config`, `gethome/device/+/state`,
-`gethome/device/+/state/+` and `gethome/device/+/availability`. Anything else
-under `gethome/` is ignored by the hub today.
+`gethome/device/+/state/+`, `gethome/device/+/availability`,
+`gethome/device/+/heartbeat`, `gethome/device/+/camera`,
+`gethome/device/+/camera/+` and `gethome/device/+/program`. Anything else under
+`gethome/` is ignored by the hub today. A hub from before cameras ignores the
+two camera topics as well, one from before heartbeats the heartbeat topic, and
+one from before programs the program topic.
+
+One branch of what is ignored is set aside on purpose: `gethome/project/<key>/`
+and everything below it is a project's own. When what you are building has
+more than one part — a board and a program on a computer, or two boards — the
+parts can talk to each other there, in whatever levels and payloads they agree
+on, and the hub never acts on it or claims it. `<key>` is the project's own
+stable key, one topic level of letters, digits, `_` and `-`, chosen by whoever
+builds the project; keep it the same when the project is renamed, or parts
+flashed at different times stop finding each other. It is **not a security
+boundary**: every board and program signed in with the `gethome` account can
+read and write it. Never put a secret there — no password, key or token — and
+never retain one, since a retained message goes to every client that
+subscribes afterwards.
 
 ## What the hub does with each message
 
@@ -63,11 +84,36 @@ under `gethome/` is ignored by the hub today.
   the document did not declare is dropped.
 - **Availability**: `online` marks the device reachable; anything else marks
   it unreachable. The apps show an unreachable device as offline.
+- **A heartbeat**: from then on the device is expected to publish something
+  live, on any of its topics, at least once every two and a half intervals,
+  never less than 30 s. If it doesn't, it is marked unreachable, as its will
+  would have marked it, and its next live message marks it reachable again.
+  What the broker hands over from what it already holds (a retained copy, on
+  subscribing) doesn't count, since after a broker restart it can be hours old.
+  An empty payload withdraws the heartbeat; a payload that isn't a whole number
+  of seconds is ignored, with a line in the hub's log. The hub keeps a
+  heartbeat that arrives before the device's document, since retained messages
+  come back in no particular order.
+- **A program message**: a JSON object marks the device as a program — code on
+  a computer, such as a bridge, a script or a service, rather than a board —
+  and the hub tells the apps so with the device. One key is read: `host`, the
+  name of the computer it runs on, for people to read (a string, trimmed, cut
+  to 120 characters; left out or empty means the computer is not named). The
+  hub never connects to it. Other keys are passed over, and nothing of them is
+  kept. An empty payload withdraws it, and the device is hardware again. A
+  payload that is not a JSON object, or whose `host` is not a string, is
+  ignored with a line in the hub's log, and the device is neither rejected nor
+  removed. The hub keeps one that arrives before the device's document, and
+  holds it in memory only: it is read again from the retained message after a
+  restart.
 
 After the hub restarts, it learns the device again from the retained document,
-availability and state. A device whose document is **not** retained is unknown
-to the hub after a restart until it publishes again — its commands fail and
-its reports are dropped in the meantime.
+availability, heartbeat and state — and from the program topic, if the device
+published one. A device whose document is **not** retained is unknown to the
+hub after a restart until it publishes again — its commands fail and its
+reports are dropped in the meantime. A retained `online` is taken at its word
+until the device's heartbeat, if it has one, says otherwise: a
+broker that lost power comes back holding it, with no will left to send.
 
 ## The discovery document
 
@@ -99,7 +145,10 @@ device; the capabilities decide the controls.
 `contact`, `illuminance`, `pressure`, `flow`, `airQuality`, `pm25`, `co2`,
 `smokeCOAlarm`, `battery`, `electricalPower`, `mode`, `rvcRun`,
 `mediaPlayback`, `event`, `irRemote`, `custom`. What each one means is in
-[capabilities.md](capabilities.md).
+[capabilities.md](capabilities.md). **Never declare `camera`**: the hub adds
+that capability itself to an endpoint whose device announces streams on its
+camera topic, and a document naming it is refused whole — by this hub and by
+every hub from before cameras.
 
 ## State patches
 
@@ -203,6 +252,8 @@ learned codes is kept by the hub, and the device receives `irLearn` and
 gethome/discovery/<deviceId>/config        ""   retained   the hub deletes the device
 gethome/device/<deviceId>/state            ""   retained   clears the broker's copy
 gethome/device/<deviceId>/availability     ""   retained   clears the broker's copy
+gethome/device/<deviceId>/program          ""   retained   the same, if it said it is a program
+gethome/device/<deviceId>/camera           ""   retained   the same, if it announced a camera
 ```
 
 (With `mosquitto_pub`, an empty retained message is `-r -n`.)

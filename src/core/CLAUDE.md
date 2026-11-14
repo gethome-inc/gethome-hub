@@ -332,12 +332,36 @@ there, because those reach the routes as well. `docs/api.md` and
   the feature away from everybody who lives there: Studio claims a hub as *the
   Mac*, so the owner is usually a laptop in a drawer and the phones are plain
   members, and a device called `0x54ef44100047c1bf` has to be fixable by whoever
-  is standing in front of it. Owner-only still guards taking things *away*
-  (`DELETE /devices/:id`, members) and every edit is logged with a name.
+  is standing in front of it. Taking things *away* still needs a key only the
+  owner holds by default (`device.remove` for `DELETE /devices/:id`,
+  `member.remove` for people), and every edit is logged with a name.
   And **the favorites map is not a second source of truth**: it is loaded once
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A removed device is held off the home until its radio lets it go.**
+  `removeDevice` is two things and only the first is done on the spot: the row
+  goes, with a `device.removed` line naming who asked, and the adapter's
+  `forget` is started and **not awaited** — a Zigbee device that cannot answer
+  is asked, refused after the coordinator's ZDO timeout, and removed by force a
+  request later, and a radio that is off (a one-radio board running the other)
+  has no adapter at all. Awaiting it held the request open longer than either
+  app waits. What makes that safe is `pendingForgets`, written to the settings
+  table (`devices.pending_forgets`) **before** the row goes: `deviceUpserted`
+  adopts nothing on it, because a radio that has not unpaired a device still
+  has it and would otherwise hand it back as a new one — fresh id, default
+  name, no room — at its next start; a running adapter is asked at once, a
+  stopped one at its next start (`replayForgets`), and only a `forget` that
+  resolves takes a device off the list. That puts three rules on every
+  adapter's `forget` (`ProtocolAdapter.forget`): stop announcing the device
+  before the first `await`, resolve only once the radio has really let go, and
+  reject rather than resolve when it cannot ask. MQTT is the one protocol that
+  cannot keep a device out: a board switched off when it was removed misses its
+  cleared config and announces itself again when switched on — the device SDK's
+  documented limit, and why the list does not hold an MQTT id once the clear is
+  published. The list is capped at 200 entries, oldest dropped, and an entry
+  this build cannot read is skipped rather than trusted. `docs/api.md` is
+  canonical.
 - **A device being offline is sometimes the plan, and only a person knows.**
   Somebody unplugs a heater for the summer: the device is unreachable, the home
   is fine, and nothing could say so — so the dashboard counted it, put *Needs
@@ -382,6 +406,16 @@ there, because those reach the routes as well. `docs/api.md` and
   And **the network's name is `hub.wifi`'s**: `deviceWire` renders `{}` without
   it (per reader, on the route and the socket), the `activity.read`
   narrowing shape. `docs/api.md` is canonical.
+- **A device may be a program, and the registry only carries the fact.** An
+  MQTT device says so on its own retained topic
+  (`adapters/mqtt/program.ts`), the adapter announces it on the descriptor as
+  `program`, and `deviceWire` renders it with presence as the answer: absent
+  for every device that isn't one. **Memory only, like `wifiNetwork`, and for
+  its reason**: the broker hands the retained message back at every start, so
+  a column would be a second copy of something the device keeps. Every
+  announcement replaces it, so a descriptor without one clears it, and only
+  the MQTT adapter ever sends one. `docs/mqtt-integrations.md` and
+  `docs/api.md` are canonical.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

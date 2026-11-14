@@ -148,6 +148,20 @@
       "when": 1794292442956,
       "tag": "0020_automation_status",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1794368001737,
+      "tag": "0021_device_panels",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1794574574217,
+      "tag": "0022_automation_origin",
+      "breakpoints": true
     }
   ]
 }

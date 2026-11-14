@@ -25,6 +25,16 @@ export interface DeviceRecognition {
   exposesHash?: string;
 }
 
+/**
+ * What a device that is a program said about itself: a script, a bridge or a
+ * service running on a computer, rather than a board. An empty object is a
+ * whole answer — a program, on a computer it didn't name. It will grow.
+ */
+export interface DeviceProgram {
+  /** The computer it runs on, by name, for people to read — never an address the hub connects to. */
+  host?: string;
+}
+
 /** What an adapter announces when it discovers (or re-reads) a device. */
 export interface AdapterDeviceDescriptor {
   adapter: AdapterId;
@@ -51,6 +61,14 @@ export interface AdapterDeviceDescriptor {
    * device is offline because they are apart (`core/device-network.ts`).
    */
   wifiNetwork?: string;
+  /**
+   * Set when the device said it is a program, and absent for every device
+   * that didn't — hardware, and anything on Zigbee or Matter. Like
+   * `wifiNetwork`, each announcement says it afresh: leaving it out of the
+   * next one is how it is taken back. Only the MQTT adapter learns it, from
+   * the device's own topic (`adapters/mqtt/program.ts`).
+   */
+  program?: DeviceProgram;
 }
 
 /**
@@ -106,11 +124,35 @@ export interface AdapterBus {
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void;
 }
 
+/** Where one camera stream is on the LAN, as an adapter knows it — never sent to an app. */
+export interface CameraSource {
+  kind: string;
+  url: string;
+}
+
 export interface ProtocolAdapter {
   readonly id: AdapterId;
   start(bus: AdapterBus): Promise<void>;
   stop(): Promise<void>;
   execute(externalId: string, endpointId: number, command: HubCommand): Promise<void>;
-  /** Forget a device at the protocol level (unpair / decommission), if supported. */
+  /**
+   * Forget a device at the protocol level (unpair / decommission), if supported.
+   *
+   * Called after the device's row has already gone, and **not awaited by the
+   * request that removed it** (`DeviceRegistry.removeDevice`). Three rules
+   * follow. Stop treating the device as yours **before the first `await`**:
+   * a report or an announcement in flight must not bring it back while the
+   * radio is still being asked. **Resolve only once the radio has really let
+   * it go** — the registry holds the device on a waiting list until then and
+   * asks again on the adapter's next start, so resolving early is the one way
+   * to lose it. And **reject, rather than resolve, when you cannot ask** —
+   * no connection, no controller — for the same reason.
+   */
   forget?(externalId: string): Promise<void>;
+  /**
+   * The LAN address of a camera stream this adapter's device announced, for
+   * the hub's camera proxy (`src/cameras/`). Optional: only the MQTT adapter
+   * has cameras today.
+   */
+  cameraSource?(externalId: string, endpointId: number, streamId: string): CameraSource | null;
 }

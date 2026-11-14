@@ -75,6 +75,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
+import { describeOrigin, originThroughKey } from '../automations/origin.js';
 import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationDevices, automationRoom } from '../automations/scope.js';
@@ -153,7 +154,10 @@ import {
   KEY_RATE_CLOSE_CODE,
   MemberSessions,
   UNAUTHORIZED_CLOSE_CODE,
+  type MemberSession,
 } from './ws.js';
+import { PanelError, PanelService } from '../panels/store.js';
+import { CameraError, CameraProxy, cameraStatus } from '../cameras/proxy.js';
 
 export interface ApiDeps {
   db: Db;
@@ -170,6 +174,14 @@ export interface ApiDeps {
   history: HistoryService;
   /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
   portraits: PortraitService;
+  /**
+   * The panels installed on devices' pages, of every kind — `panels/store.ts`.
+   * Optional for the reason `allowedHosts` gives: a suite that doesn't care
+   * gets one made here, empty.
+   */
+  panels?: PanelService;
+  /** The camera proxy — `cameras/proxy.ts`. Optional for the same reason. */
+  cameras?: CameraProxy;
   /**
    * The photos a home, or one person, chose to keep — `photos/store.ts`.
    *
@@ -342,6 +354,8 @@ interface CommissionJob {
  * way to hand a Raspberry Pi ten megabytes of anything.
  */
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
+/** A `web` panel's 512 KB, base64'd, with room for the JSON around it. */
+const PANEL_BODY_LIMIT = 1024 * 1024;
 
 /**
  * One photo at the ceiling as a JSON encoder writes it: its base64, plus room
@@ -751,6 +765,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }),
   );
 
+  /**
+   * Made here when a suite didn't pass them, so the routes are always there;
+   * `src/index.ts` passes the real ones, loaded and shut down with the hub.
+   */
+  const panels = deps.panels ?? new PanelService(deps.db, deps.events, deps.dataDir, deps.log);
+  const cameras = deps.cameras ?? new CameraProxy({ log: deps.log });
+  /** What the socket reads: the same services the routes use, never a second copy. */
+  const socketDeps: ApiDeps = { ...deps, panels, cameras };
+  // A stream left relaying after the server closed would hold its socket open.
+  app.addHook('onClose', async () => cameras.close());
   const commissionJobs = new Map<string, CommissionJob>();
   /**
    * Who is holding a live event stream, so removing them can hang it up.
@@ -759,6 +783,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * instance, and a registry outliving it would be a registry of dead ones.
    */
   const sessions = new MemberSessions();
+  /**
+   * Who is watching a camera live, filed the same way and for the same
+   * reason: an MJPEG stream authorizes once, when it opens, and then relays
+   * frames for as long as the app holds it. Kept apart from `sessions`
+   * because a key's sockets are counted against `MAX_SOCKETS_PER_KEY` and its
+   * cameras against the proxy's own limit, and neither should spend the
+   * other's.
+   */
+  const cameraViewers = new MemberSessions();
 
   /**
    * Why an explicitly requested **recognition** run must not start, or `null`
@@ -912,6 +945,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, presence the capability: a hub carrying this block shows
+    // cameras through itself (`/cameras/…`), and these are the stream kinds it
+    // relays and how many cameras it streams at once. `maxStreamsPerKey`
+    // arrived later and says how many of those one API key may open itself;
+    // a hub without it lets no key watch a camera at all.
+    cameras: cameras.describe(),
+    // Additive, presence the capability: a hub carrying this block keeps
+    // panels on devices' pages (`/devices/:id/panels/…`), within these bounds.
+    // `kinds` names each kind it takes, with that kind's own bounds — a client
+    // offers a kind of panel only where it is named, so a kind a later hub
+    // adds never reaches one that would refuse it. An app that doesn't find
+    // the block offers no panel to install.
+    panels: panels.describe(),
     // Additive, and presence is the capability, the portraits' way: a hub
     // carrying this block draws pictures of rooms (`/room-pictures`).
     roomPictures: roomPictures.describe(),
@@ -944,8 +990,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // yet — where there is nothing to look for a field on. `problems` says a
     // run's trace marks the steps that were a problem (`problem` on a step,
     // `problems` on the `automationRun` frame) — which is the only way to tell
-    // an unmarked step that was fine from one this hub never marks.
-    automations: { status: true, devices: true, problems: true },
+    // an unmarked step that was fine from one this hub never marks. `origin`
+    // says every rule carries who added it and how (`origin`, which is `null`
+    // where the hub has nothing to say) — so an app can tell a rule with no
+    // origin from a hub that never sends one.
+    automations: { status: true, devices: true, problems: true, origin: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this
@@ -1674,7 +1723,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const view = deviceWireView(deps, memberId, request.apiKey);
     return deps.registry
       .listDevices()
-      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
+      .map((device) =>
+        deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view, panels.list(device.id)),
+      );
   });
 
   /**
@@ -1819,15 +1870,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       device,
       deps.favorites.isFavorite(memberId, id),
       deviceWireView(deps, memberId, request.apiKey),
+      panels.list(id),
     );
   });
 
   const roomExists = async (id: string): Promise<boolean> =>
     (await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) })) !== undefined;
 
+  /**
+   * Take a device out of the home, and unpair it.
+   *
+   * Answers once the home has let go — the row, the activity line naming who
+   * did it, the `deviceRemoved` frame — and **not** once the radio has: that
+   * is seconds for a Zigbee device that has to be asked and then forced, and
+   * indefinite for one whose radio is off on a one-radio board. The registry
+   * keeps the device off the home until its radio lets it go
+   * (`DeviceRegistry.removeDevice`), so a 204 is the whole answer an app needs.
+   */
   app.delete('/api/v1/devices/:id', needs('device.remove'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
-    const removed = await deps.registry.removeDevice(id);
+    const removed = await deps.registry.removeDevice(id, actor(request));
     if (!removed) return reply.code(404).send({ error: 'not_found' });
     return reply.code(204).send();
   });
@@ -2115,6 +2177,236 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     announcePortraits(deviceId);
     return reply.code(204).send();
   });
+
+  // ── Panels ───────────────────────────────────────────────────────────────
+
+  /**
+   * Install a panel on a device's page, or replace the one with that id,
+   * whatever kind either is — one collection, so a device never has two
+   * panels under one id.
+   *
+   * `device.edit`, because a panel changes what everybody in the house sees on
+   * that device's page — the same reason a rename needs it. JSON with the files
+   * as base64 rather than an archive, as portraits take a photo: no archive
+   * library on a 512 MB board, and every byte is checked as it is decoded.
+   * An upload identical to what is stored writes nothing and records nothing.
+   *
+   * `kind` is required and checked by the store rather than by zod, so a kind
+   * this hub doesn't keep is its own refusal (`unsupported_panel_kind`) — a
+   * client that skipped `GET /hub`'s `panels.kinds` learns this hub is older
+   * than the panel, rather than that its request was malformed.
+   *
+   * **The member's, never an API key's** — a panel is code every phone in the
+   * house runs, which is more than `device.edit` hands a key elsewhere (a
+   * name, a room, a portrait). Closed is the default a key's route table
+   * gives an undecided write, and the reversible one: opening it later is
+   * additive, closing it after it shipped is not.
+   */
+  app.put(
+    '/api/v1/devices/:id/panels/:panelId',
+    { ...memberOnlyNeeds('device.edit'), bodyLimit: PANEL_BODY_LIMIT },
+    async (request, reply) => {
+      const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
+      const device = deps.registry.getDevice(id);
+      if (!device) return reply.code(404).send({ error: 'not_found' });
+      const body = z
+        .object({
+          kind: z.string().min(1).max(40),
+          title: z.string().min(1).max(60),
+          height: z.number().int().min(60).max(800).optional(),
+          files: z
+            .array(z.object({ path: z.string().min(1).max(120), dataBase64: z.string().max(PANEL_BODY_LIMIT) }).strict())
+            .min(1)
+            .max(64),
+        })
+        .strict()
+        .parse(request.body);
+      try {
+        const member = request.member!;
+        const who = actor(request);
+        const { changed, panel } = await panels.put(
+          id,
+          panelId,
+          { kind: body.kind, title: body.title, files: body.files, ...(body.height !== undefined ? { height: body.height } : {}) },
+          { id: member.id, name: member.name },
+        );
+        if (changed) {
+          await deps.activity.record({
+            kind: 'device.panel',
+            message: `${who.name} installed the panel “${panel.title}” on ${device.name}.`,
+            memberId: who.memberId,
+            deviceId: id,
+            data: { deviceName: device.name, panelId, title: panel.title, ...who.data },
+          });
+        }
+        return { panel, changed };
+      } catch (error) {
+        if (error instanceof PanelError) {
+          const status =
+            error.code === 'invalid_panel' || error.code === 'unsupported_panel_kind'
+              ? 400
+              : error.code === 'storage_low'
+                ? 507
+                : 409;
+          return reply.code(status).send({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete('/api/v1/devices/:id/panels/:panelId', memberOnlyNeeds('device.edit'), async (request, reply) => {
+    const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
+    const device = deps.registry.getDevice(id);
+    if (!device || !(await panels.remove(id, panelId))) return reply.code(404).send({ error: 'not_found' });
+    const who = actor(request);
+    await deps.activity.record({
+      kind: 'device.panel',
+      message: `${who.name} removed a panel from ${device.name}.`,
+      memberId: who.memberId,
+      deviceId: id,
+      data: { deviceName: device.name, panelId, removed: true, ...who.data },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * One file of a panel, for the apps' panel host to load.
+   *
+   * The floor, as reading the device is. The path is looked up in the stored
+   * manifest — never on disk — and every answer says what it is and that it
+   * may not be sniffed into anything else; the CSP is for anything that opens
+   * one of these outside an app, where it must not reach the network either.
+   * Under `files/` rather than straight under the panel, so the panel's own
+   * path stays free for whatever a later kind needs beside its files.
+   */
+  // For the apps' panel host, which holds a member's token; a key has nothing
+  // to run a panel in.
+  app.get('/api/v1/devices/:id/panels/:panelId/files/*', memberOnly, async (request, reply) => {
+    const params = z
+      .object({ id: z.uuid(), panelId: z.string().max(40), '*': z.string().max(200) })
+      .parse(request.params);
+    const found = await panels.file(params.id, params.panelId, params['*']);
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+    const etag = `"${found.file.sha256}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    return reply
+      .header('content-type', found.file.type)
+      .header('x-content-type-options', 'nosniff')
+      .header('cache-control', 'no-cache')
+      .header('etag', etag)
+      .header(
+        'content-security-policy',
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+      )
+      .send(found.data);
+  });
+
+  // ── Cameras ──────────────────────────────────────────────────────────────
+
+  /**
+   * A still from a camera, through the hub.
+   *
+   * `camera.view` — Owner and Member by default, not Guest — because a camera
+   * shows people; a key holds it only when it was given it on purpose
+   * (`KEY_GRANTABLE` says why). The app names the stream by device, endpoint
+   * and stream id and never learns where the camera is; the hub fetches it
+   * from the address the camera announced, after the checks in `cameras/`.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'snapshot');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      try {
+        const jpeg = await cameras.snapshot(target);
+        return reply.header('content-type', 'image/jpeg').header('cache-control', 'no-store').send(jpeg);
+      } catch (error) {
+        if (error instanceof CameraError) return reply.code(cameraStatus(error.code)).send({ error: error.code });
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * A camera live, as MJPEG, through the hub — shared with anybody already
+   * watching it, since the camera serves one client.
+   *
+   * A key is named to the proxy, which lets it open one stream at a time and
+   * never the last free one; a still is a fresh request each time and already
+   * paced by the key's rate limit, so the route above names nobody.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'mjpeg');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      // Filed like a socket, so revoking the key or removing the member hangs
+      // it up at once — and turned away if either happened while this request
+      // was being authenticated (`LATE_ADMISSION_MS`).
+      const memberId = request.member!.id;
+      let key = request.apiKey;
+      let hangUp: (() => void) | null = null;
+      let revoked = false;
+      const viewer: MemberSession = {
+        revoke: () => {
+          revoked = true;
+          hangUp?.();
+        },
+        rekey: (next) => {
+          key = next;
+        },
+      };
+      const admitted = cameraViewers.admit(memberId, viewer, key);
+      if (!admitted) return reply.code(401).send({ error: 'unauthorized' });
+      key = admitted.key;
+      const keyId = key?.id;
+      reply.raw.on('close', () => cameraViewers.forget(memberId, viewer, keyId));
+      // Asked before every frame, as the socket asks before every frame: a
+      // key that has expired, been paused or lost `camera.view`, or a role
+      // that has, sees nothing more.
+      const allowed = () =>
+        !revoked &&
+        (key === null || apiKeyState(key, deps.access) === 'active') &&
+        deps.access.canAs(memberId, 'camera.view', key);
+      const opener = key ? { keyId: key.id } : undefined;
+      try {
+        reply.hijack();
+        hangUp = await cameras.watch(
+          target,
+          reply.raw,
+          (listener) => request.raw.on('close', listener),
+          opener,
+          allowed,
+        );
+        // Revoked while the board was proving itself.
+        if (revoked) hangUp();
+      } catch (error) {
+        const code = error instanceof CameraError ? error.code : 'camera_unreachable';
+        const status = error instanceof CameraError ? cameraStatus(error.code) : 502;
+        if (!reply.raw.headersSent) {
+          reply.raw.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+          reply.raw.end(JSON.stringify({ error: code }));
+        } else {
+          reply.raw.end();
+        }
+      }
+    },
+  );
+
+  /** The stream a camera route names, if the device announced one of that kind. */
+  function cameraTarget(params: unknown, kind: 'snapshot' | 'mjpeg') {
+    const parsed = z
+      .object({ deviceId: z.uuid(), endpointId: z.coerce.number().int().min(0), streamId: z.string().max(32) })
+      .safeParse(params);
+    if (!parsed.success) return null;
+    const { deviceId, endpointId, streamId } = parsed.data;
+    const source = deps.registry.cameraSource(deviceId, endpointId, streamId);
+    if (!source || source.kind !== kind) return null;
+    return { key: `${deviceId}/${String(endpointId)}/${streamId}`, externalId: source.externalId, url: source.url };
+  }
 
   // ── Photos the hub keeps ─────────────────────────────────────────────────
   //
@@ -2861,6 +3153,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   ) {
     const closed = sessions.revoke(memberId);
     if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
+    const watching = cameraViewers.revoke(memberId);
+    if (watching > 0) deps.log.info({ memberId, watching }, 'Closed camera streams for a former member');
     // Their pins went with the member row (`device_favorites.member_id`
     // cascades); this is the in-memory half of the same delete. `access` holds
     // the same kind of map, keyed the same way, and would otherwise answer for
@@ -3249,6 +3543,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Its open streams render with the new grant from the next frame, and
     // the `access` frame every socket re-sends is how they hear it now.
     sessions.rekey(updated);
+    cameraViewers.rekey(updated);
     deps.events.emit('accessChanged');
 
     const accessMoved =
@@ -3303,6 +3598,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const owner = mine ? me.name : ((await deps.pairing.member(key.memberId))?.name ?? null);
     const closed = sessions.revokeKey(id);
     if (closed > 0) deps.log.info({ apiKeyId: id, closed }, 'Closed event streams for a revoked API key');
+    const watching = cameraViewers.revokeKey(id);
+    if (watching > 0) deps.log.info({ apiKeyId: id, watching }, 'Closed camera streams for a revoked API key');
     await apiKeys.remove(id);
     const who = actor(request);
     await deps.activity.record({
@@ -4259,6 +4556,50 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // ── Automations ──────────────────────────────────────────────────────────
 
   /**
+   * The names an answer about rules needs: who is in the home, and what each
+   * API key that added a rule is called now.
+   *
+   * Read once per answer rather than per rule, and read live rather than kept
+   * on the engine's records — a member who renames themselves is the same
+   * person on every rule they added, and a second copy of their name held in
+   * the engine would be the one that went stale. The keys are read only when
+   * some rule was added through one, which in most homes is never.
+   */
+  type AutomationNames = { members: Map<string, string>; apiKeys: Map<string, string> };
+  const automationNames = async (
+    records: ReadonlyArray<ReturnType<AutomationEngine['list']>[number]>,
+  ): Promise<AutomationNames> => {
+    const members = new Map(
+      (await deps.db.query.members.findMany()).map((row) => [row.id, row.name]),
+    );
+    const throughKey = records.some((record) => record.origin?.apiKeyId !== undefined);
+    const keys = throughKey ? await apiKeys.list() : [];
+    return { members, apiKeys: new Map(keys.map((key) => [key.id, key.name])) };
+  };
+
+  /** A rule's origin, with every name in it as it stands today. */
+  const automationOrigin = (
+    record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
+  ) => {
+    const memberName =
+      record.createdBy !== null ? names.members.get(record.createdBy) : undefined;
+    const keyId = record.origin?.apiKeyId;
+    const keyName = keyId !== undefined ? names.apiKeys.get(keyId) : undefined;
+    const templateKey = record.origin?.template;
+    const templateTitle = templateKey !== undefined ? findTemplate(templateKey)?.title : undefined;
+    return describeOrigin({
+      stored: record.origin,
+      member:
+        record.createdBy !== null && memberName !== undefined
+          ? { id: record.createdBy, name: memberName }
+          : null,
+      ...(keyName !== undefined ? { apiKeyName: keyName } : {}),
+      ...(templateTitle !== undefined ? { templateTitle } : {}),
+    });
+  };
+
+  /**
    * A rule as the apps read it.
    *
    * `summary` is the contract and the document is the convenience — the
@@ -4269,6 +4610,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const automationWire = (
     record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
     /**
      * The home to read the rule against, so a route drawing a list builds it
      * once rather than once per rule. `homeView()` walks every device and every
@@ -4334,6 +4676,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * "this hub does not say" rather than "this rule has never run".
      */
     status: deps.automations.statusOf(record.id),
+    /**
+     * Who added the rule and how it reached the hub (`describeOrigin`):
+     * `sentence` is the whole answer in words, and the fields beside it are
+     * the ones an activity row uses for the same things.
+     *
+     * `null` when there is nothing to say — a rule from before the hub kept
+     * this, whose author has since left the home — and absent altogether on
+     * a hub older than the field, which `GET /hub`'s `automations.origin`
+     * tells apart. The member and the key are named as they are *now*, and a
+     * key that is gone by the name it had.
+     */
+    origin: automationOrigin(record, names),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
@@ -4349,8 +4703,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/automations', authed, async () => {
     const home = deps.automations.homeView();
+    const records = deps.automations.list();
+    const names = await automationNames(records);
     return {
-      automations: deps.automations.list().map((record) => automationWire(record, home)),
+      automations: records.map((record) => automationWire(record, names, home)),
       unreadable: deps.automations.unreadableRules(),
     };
   });
@@ -4377,7 +4733,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const record = deps.automations.get(id);
     if (!record) return reply.code(404).send({ error: 'not_found' });
-    return automationWire(record);
+    return automationWire(record, await automationNames([record]));
   });
 
   /**
@@ -4496,7 +4852,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (report.problems.length > 0) {
       return reply.code(422).send({ error: 'invalid_automation', ...report });
     }
-    const record = await deps.automationStore.create(parsed.data, request.member!.id);
+    // A document, and the key that sent it when one did — which is all the
+    // hub can see. Which app was holding a member's own sign-in is not
+    // something a request says, so nothing here guesses it.
+    const record = await deps.automationStore.create(parsed.data, request.member!.id, 'created', {
+      kind: 'document',
+      ...originThroughKey(request.apiKey),
+    });
     await deps.automations.reload();
     deps.events.emit('automationChanged', record.id);
     const who = actor(request);
@@ -4507,9 +4869,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       data: { automationId: record.id, automationName: record.name, ...who.data },
     });
     const saved = deps.automations.get(record.id);
-    return reply
-      .code(201)
-      .send({ ...(saved ? automationWire(saved) : {}), warnings: report.warnings });
+    return reply.code(201).send({
+      ...(saved ? automationWire(saved, await automationNames([saved])) : {}),
+      warnings: report.warnings,
+    });
   });
 
   /**
@@ -4609,7 +4972,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     const saved = deps.automations.get(id);
-    return { ...(saved ? automationWire(saved) : {}), warnings };
+    return { ...(saved ? automationWire(saved, await automationNames([saved])) : {}), warnings };
   });
 
   app.delete('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
@@ -4654,7 +5017,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.automations.reload();
     deps.events.emit('automationChanged', id);
     const saved = deps.automations.get(id);
-    return saved ? automationWire(saved) : reply.code(404).send({ error: 'not_found' });
+    return saved
+      ? automationWire(saved, await automationNames([saved]))
+      : reply.code(404).send({ error: 'not_found' });
   });
 
   /**
@@ -4688,7 +5053,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         warnings.push(...report.problems);
         continue;
       }
-      const record = await deps.automationStore.create(document, request.member!.id, `from ${key}`);
+      const record = await deps.automationStore.create(
+        document,
+        request.member!.id,
+        `from ${key}`,
+        { kind: 'template', template: key, ...originThroughKey(request.apiKey) },
+      );
       created.push(record.id);
     }
     await deps.automations.reload();
@@ -4703,11 +5073,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Read after the reload above, and once for the whole answer rather than
     // per rule — a template can install several.
     const home = deps.automations.homeView();
+    const installed = created
+      .map((id) => deps.automations.get(id))
+      .filter((record) => record !== undefined);
+    const names = await automationNames(installed);
     return reply.code(201).send({
-      automations: created
-        .map((id) => deps.automations.get(id))
-        .filter((record) => record !== undefined)
-        .map((record) => automationWire(record, home)),
+      automations: installed.map((record) => automationWire(record, names, home)),
       warnings,
     });
   });
@@ -5506,7 +5877,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // fired the moment the socket opens is held — and rendered once the
       // socket knows who is reading — instead of lost in the gap between
       // "connected" and "authorized".
-      const handle = attachWebSocket(socket, deps, sessions, hubStatus);
+      const handle = attachWebSocket(socket, socketDeps, sessions, hubStatus);
       void (async () => {
         const credential = extractCredential(request);
         const result = credential

@@ -75,6 +75,13 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary: 'Take a device out of the home and unpair it. Nothing in the apps undoes this.',
   },
   {
+    key: 'camera.view',
+    group: 'Devices',
+    title: 'Watch the cameras',
+    summary:
+      'See what the home\u2019s cameras see \u2014 a still, or live. The pictures come through the hub and are not recorded.',
+  },
+  {
     key: 'home.structure',
     group: 'Home',
     title: 'Change rooms and zones',
@@ -194,6 +201,7 @@ export type PermissionKey =
   | 'device.edit'
   | 'device.add'
   | 'device.remove'
+  | 'camera.view'
   | 'home.structure'
   | 'home.rename'
   | 'activity.read'
@@ -234,6 +242,18 @@ export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry)
  *    the building, and a key is already one.
  *  - `hub.wifi` — where the hub has been, and the one change that can take it
  *    off its network.
+ *
+ * What is here and needs saying:
+ *  - `camera.view` — a camera shows people, so it is given to a key on purpose
+ *    and never by default, and what it gives is wide: a key holding it sees
+ *    every camera in the home, at any hour, and the hub keeps no record of each
+ *    look, for a key as for a person. It is here because software that watches
+ *    a camera for the home (somebody at the door, a parcel on the step) is a
+ *    fair thing to want, and it would otherwise be handed a member's own token
+ *    with everything else in it. Stills are fresh requests under the key's rate
+ *    limit; a stream holds one of the few the hub relays at once, so the proxy
+ *    lets a key open one and never the last free one (`cameras/proxy.ts`).
+ *    Software should prefer stills on a schedule.
  */
 export const KEY_GRANTABLE: readonly PermissionKey[] = PERMISSION_KEYS.filter((key) =>
   (
@@ -241,6 +261,7 @@ export const KEY_GRANTABLE: readonly PermissionKey[] = PERMISSION_KEYS.filter((k
       'device.edit',
       'device.add',
       'device.remove',
+      'camera.view',
       'home.structure',
       'home.rename',
       'activity.read',
@@ -349,10 +370,19 @@ export const BUILTIN_ROLES = [
      * and revoking each write a row, and everything a key does is written as
      * the member it belongs to, through that key. Guest is where the line
      * falls. It travels with `0018`.
+     *
+     * `camera.view` is here because watching the porch is what living in a
+     * home with a camera on its porch means — the person at the door is
+     * looking at a phone, not at a laptop in a drawer. It is a permission at
+     * all, rather than the floor, because a camera shows *people*: a home
+     * that has somebody staying decides whether they see the hallway, and
+     * Guest starts without it. It reaches homes that already exist through
+     * migration `0019`, the way `hub.ai` travelled in `0006`.
      */
     permissions: [
       'device.edit',
       'device.add',
+      'camera.view',
       'home.structure',
       'activity.read',
       'automation.manage',

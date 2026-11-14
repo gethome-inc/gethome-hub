@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  CAPABILITY_KINDS,
+  DECLARABLE_CAPABILITY_KINDS,
   DEVICE_KINDS,
   commandSchema,
   type CapabilityKind,
@@ -184,7 +184,10 @@ export const targetSchema = z.union([
     .object({
       select: z
         .object({
-          capability: z.enum(CAPABILITY_KINDS).optional(),
+          // Declarable kinds: a rule naming `camera` would be unreadable by
+          // the build an update rolls back to, and a camera has no state a
+          // rule could watch.
+          capability: z.enum(DECLARABLE_CAPABILITY_KINDS).optional(),
           kind: z.enum(DEVICE_KINDS).optional(),
           roomId: z.uuid().optional(),
           zoneId: z.uuid().optional(),

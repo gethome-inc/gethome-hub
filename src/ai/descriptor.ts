@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import {
-  CAPABILITY_KINDS,
+  DECLARABLE_CAPABILITY_KINDS,
   DEVICE_KINDS,
   clamp,
   type CapabilityKind,
+  type DeclarableCapabilityKind,
   type EndpointState,
   type HubCommand,
 } from '../schema/index.js';
@@ -186,8 +187,10 @@ export const endpointMappingSchema = z
   .object({
     endpointId: z.number().int().min(0),
     deviceKind: z.enum(DEVICE_KINDS),
-    capabilities: z.array(z.enum(CAPABILITY_KINDS)).min(1),
-    primary: z.enum(CAPABILITY_KINDS),
+    // Declarable kinds only: a stored mapping naming `camera` would be
+    // unreadable by the build an update rolls back to (src/schema/capabilities.ts).
+    capabilities: z.array(z.enum(DECLARABLE_CAPABILITY_KINDS)).min(1),
+    primary: z.enum(DECLARABLE_CAPABILITY_KINDS),
     stateRules: z.array(stateRuleSchema),
     commandRules: z.array(commandRuleSchema).default([]),
     customFields: z.array(customFieldSchema).max(32).default([]),
@@ -213,7 +216,7 @@ export type EndpointMapping = z.infer<typeof endpointMappingSchema>;
 
 // ── Sanity checks beyond structural validation ──────────────────────────────
 
-const PATH_CAPABILITY: Record<StatePath, CapabilityKind> = {
+const PATH_CAPABILITY: Record<StatePath, DeclarableCapabilityKind> = {
   onOff: 'onOff',
   'level.current': 'level',
   'colorTemperature.mireds': 'colorTemperature',

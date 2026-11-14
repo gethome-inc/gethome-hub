@@ -519,3 +519,157 @@ describe.skipIf(!enabled)('ZigbeeAdapter overlay merge', () => {
     expect(patches.at(-1)!.patch.onOff).toBe(true);
   });
 });
+
+/**
+ * Taking a device off the network, against a fake Zigbee2MQTT that answers
+ * `bridge/request/device/remove` the way the real one does: a device that
+ * cannot answer is refused when asked plainly, kept in Zigbee2MQTT's database,
+ * and handed back in its retained device list on the next start — as a new
+ * device, after somebody removed it. So a refusal is followed by a forced
+ * removal, and until the bridge's own list lets the device go nothing it
+ * publishes about it is adopted again.
+ */
+describe.skipIf(!enabled)('ZigbeeAdapter taking a device off the network', () => {
+  const base = `z2m-forget-${Math.random().toString(16).slice(2, 8)}`;
+  let fake: mqtt.MqttClient;
+  let adapter: ZigbeeAdapter;
+
+  const lamp = { ...probe, ieee_address: '0xfeed0000000000c1', friendly_name: 'forget lamp' };
+  const sensor = { ...probe, ieee_address: '0xfeed0000000000c2', friendly_name: 'forget sensor' };
+  let onBridge = [lamp, sensor];
+
+  /** What the fake bridge was asked, in order. */
+  const asked: Array<{ id?: string; force?: boolean; transaction?: string }> = [];
+  /** How the fake bridge answers a plain removal: as for a device that is away, unless told otherwise. */
+  let plainRemovalWorks = false;
+
+  const upserts: AdapterDeviceDescriptor[] = [];
+  const bus: AdapterBus = {
+    deviceUpserted: (descriptor) => upserts.push(descriptor),
+    deviceRemoved: () => {},
+    stateChanged: () => {},
+    reachabilityChanged: () => {},
+    radioReachabilityChanged: () => {},
+    commandFailed: () => {},
+    activity: () => {},
+  };
+  const upsertsOf = (ieee: string) => upserts.filter((descriptor) => descriptor.externalId === ieee).length;
+
+  const publishList = () =>
+    fake.publishAsync(`${base}/bridge/devices`, JSON.stringify(onBridge), { retain: true });
+
+  beforeAll(async () => {
+    fake = await mqtt.connectAsync(MQTT_URL);
+    await fake.publishAsync(`${base}/bridge/state`, '{"state":"online"}', { retain: true });
+    await publishList();
+    await fake.subscribeAsync(`${base}/bridge/request/device/remove`);
+    fake.on('message', (topic, payload) => {
+      if (topic !== `${base}/bridge/request/device/remove`) return;
+      const request = JSON.parse(payload.toString()) as { id?: string; force?: boolean; transaction?: string };
+      asked.push(request);
+      void (async () => {
+        if (!request.force && !plainRemovalWorks) {
+          // The bridge republishes its list for reasons of its own while the
+          // device is being asked — still naming the device. That must not
+          // bring it back.
+          await publishList();
+          await fake.publishAsync(
+            `${base}/bridge/response/device/remove`,
+            JSON.stringify({
+              data: {},
+              status: 'error',
+              error: `Failed to remove device '${request.id}' (block: false, force: false) (Error: ZDO timeout)`,
+              transaction: request.transaction,
+            }),
+          );
+          return;
+        }
+        // Zigbee2MQTT publishes its list without the device, then answers.
+        onBridge = onBridge.filter((device) => device.ieee_address !== request.id);
+        await publishList();
+        await fake.publishAsync(
+          `${base}/bridge/response/device/remove`,
+          JSON.stringify({
+            data: { id: request.id, block: false, force: request.force === true },
+            status: 'ok',
+            transaction: request.transaction,
+          }),
+        );
+      })();
+    });
+
+    adapter = new ZigbeeAdapter({
+      mqttUrl: MQTT_URL,
+      baseTopic: base,
+      log: pino({ level: 'silent' }),
+      parameterRemapDelayMs: 50,
+    });
+    await adapter.start(bus);
+    await waitFor(() => upsertsOf(lamp.ieee_address) === 1 && upsertsOf(sensor.ieee_address) === 1);
+  }, 30_000);
+
+  afterAll(async () => {
+    await fake?.publishAsync(`${base}/bridge/devices`, '', { retain: true }).catch(() => {});
+    await fake?.publishAsync(`${base}/bridge/state`, '', { retain: true }).catch(() => {});
+    await fake?.endAsync().catch(() => {});
+    await adapter?.stop();
+  });
+
+  it('removes a device that cannot answer by force, and does not adopt it again meanwhile', async () => {
+    let settled = false;
+    void adapter.forget(lamp.ieee_address).then(() => {
+      settled = true;
+    });
+    await waitFor(() => settled);
+
+    expect(asked.map(({ id, force }) => ({ id, force }))).toEqual([
+      { id: lamp.ieee_address, force: undefined },
+      { id: lamp.ieee_address, force: true },
+    ]);
+    // Each request carried its own transaction, which is how its answer was found.
+    expect(new Set(asked.map((request) => request.transaction)).size).toBe(2);
+    // The republish that still named it, and the one after: neither adopted it.
+    expect(upsertsOf(lamp.ieee_address)).toBe(1);
+    // A report about it is a stranger's now.
+    await fake.publishAsync(`${base}/${lamp.friendly_name}`, JSON.stringify({ temperature: 19 }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(upsertsOf(lamp.ieee_address)).toBe(1);
+  });
+
+  it('settles at once for a device the bridge no longer has', async () => {
+    asked.length = 0;
+    let settled = false;
+    void adapter.forget(lamp.ieee_address).then(() => {
+      settled = true;
+    });
+    await waitFor(() => settled);
+    expect(asked).toEqual([]);
+  });
+
+  it('can adopt a device again once the bridge let it go and it was paired again', async () => {
+    onBridge = [...onBridge, lamp];
+    await publishList();
+    await waitFor(() => upsertsOf(lamp.ieee_address) === 2);
+  });
+
+  it('waits for a bridge that is not running, and asks the moment it is back', async () => {
+    asked.length = 0;
+    plainRemovalWorks = true;
+    await fake.publishAsync(`${base}/bridge/state`, '{"state":"offline"}', { retain: true });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    let settled = false;
+    void adapter.forget(sensor.ieee_address).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Nobody to hear it, so nothing was said — and nothing settled.
+    expect(asked).toEqual([]);
+    expect(settled).toBe(false);
+
+    await fake.publishAsync(`${base}/bridge/state`, '{"state":"online"}', { retain: true });
+    await waitFor(() => settled);
+    // A device that answers leaves when asked, with no force needed.
+    expect(asked.map(({ id, force }) => ({ id, force }))).toEqual([{ id: sensor.ieee_address, force: undefined }]);
+  });
+});

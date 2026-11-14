@@ -14,6 +14,7 @@ reading; the key's member must also hold any permission named. The hub's
 | `device.edit` | rename devices, move them between rooms, mark one as expected to be offline, choose a portrait |
 | `device.add` | open the Zigbee network, pair a Matter accessory, look for accessories to pair |
 | `device.remove` | take a device out of the home and unpair it |
+| `camera.view` | see every camera in the home, a still or live, at any hour — and the hub keeps no record of each look, so it is for software the person trusts with that. A hub that does not list it in `apiKeys.grantable` refuses to give it |
 | `home.structure` | add, rename, restyle and delete rooms and zones |
 | `home.rename` | rename the home (and the hub) |
 | `activity.read` | read everybody's activity, not only its member's |
@@ -43,7 +44,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
 | `GET /api/v1/activity?limit=&before=` | newest first; only the member's own rows unless the key has `activity.read` |
-| `GET /api/v1/automations` | `{automations, unreadable}` — an object, not a list. `automations` is every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId`, `devices` (`{reads, controls}`, device ids) and `status` (whether it is working — see the automations reference); `unreadable` is rules a newer build wrote that this hub cannot run, kept rather than lost |
+| `GET /api/v1/automations` | `{automations, unreadable}` — an object, not a list. `automations` is every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId`, `devices` (`{reads, controls}`, device ids), `status` (whether it is working) and `origin` (who added it and how — see the automations reference for both); `unreadable` is rules a newer build wrote that this hub cannot run, kept rather than lost |
 | `GET /api/v1/automations/{automationId}` · `GET /api/v1/automations/{automationId}/runs` | one rule, and why it fired |
 | `GET /api/v1/automations/capabilities` | the rule vocabulary, generated from the hub's own schema |
 | `GET /api/v1/automations/templates` | the shipped presets |
@@ -67,12 +68,14 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
 | `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` and/or `{"selected": true}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), makes it the picture its room shows, or takes the picture away, for everybody in the home |
-| `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first** |
+| `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first**. `204` once the home has let go; the hub unpairs it from its radio afterwards, and a device paired again is a new device |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
 | `POST /api/v1/rooms` · `PATCH /api/v1/rooms/{roomId}` · `DELETE /api/v1/rooms/{roomId}` | `home.structure` |
 | `POST /api/v1/zones` · `PATCH /api/v1/zones/{zoneId}` · `DELETE /api/v1/zones/{zoneId}` | `home.structure` |
 | `PATCH /api/v1/home` `{"name": "…"}` | `home.rename` |
+| `GET /api/v1/cameras/{deviceId}/{endpointId}/{streamId}/snapshot` | `camera.view` — one `image/jpeg` of a `snapshot` stream. Each is a fresh request from the hub to the camera and counts against the key's rate limit; prefer a still on a schedule to a stream |
+| `GET /api/v1/cameras/{deviceId}/{endpointId}/{streamId}/mjpeg` | `camera.view` — an `mjpeg` stream, live for as long as the request is held open. The hub relays only a few streams at once (`cameras.maxStreams` on `GET /api/v1/hub`) and shares them with the people in the home, so a key may **open** one at a time (`cameras.maxStreamsPerKey`) and never the last free one; either refusal is `409 camera_busy`. Joining a stream somebody already has open is always allowed. Hang up when done |
 | `POST /api/v1/automations/dry-run` · `POST /api/v1/automations` · `PATCH /api/v1/automations/{automationId}` · `DELETE /api/v1/automations/{automationId}` | `automation.manage` |
 | `GET /api/v1/automations/{automationId}/versions` · `POST /api/v1/automations/{automationId}/revert` · `POST /api/v1/automations/templates/{key}` | `automation.manage` |
 | `PUT /api/v1/settings/timezone` | `automation.manage` |

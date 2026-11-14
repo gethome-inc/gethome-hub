@@ -1,6 +1,7 @@
 import type { AccessService, KeyGrant } from '../core/access.js';
 import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
+import type { PanelSummary } from '../panels/store.js';
 
 /**
  * What a device's rendering depends on besides the device: the reader, and
@@ -44,8 +45,17 @@ export function deviceWireView(
  * without knowing anything happened. It has to be passed in rather than read
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
+ *
+ * `panels` is the device's own — the panels installed on its page, of every
+ * kind, `panels/store.ts` — and is passed per device rather than carried in
+ * the view, which is the reader's and asked once per render.
  */
-export function deviceWire(device: RegistryDevice, favorite: boolean, view: DeviceWireView = {}) {
+export function deviceWire(
+  device: RegistryDevice,
+  favorite: boolean,
+  view: DeviceWireView = {},
+  panels?: PanelSummary[],
+) {
   const elsewhere = offlineElsewhere(device, view.hubWifi);
   return {
     id: device.id,
@@ -90,6 +100,21 @@ export function deviceWire(device: RegistryDevice, favorite: boolean, view: Devi
     ...(elsewhere !== undefined
       ? { offlineElsewhere: view.namesNetworks === true ? { network: elsewhere.network } : {} }
       : {}),
+    // **Presence is the answer** again: only a device that said it is a
+    // program — on its own MQTT topic, `adapters/mqtt/program.ts` — carries
+    // the key, so the wire of every other device is what it was. `host` is
+    // the computer it named, left out when it named none, which makes `{}` a
+    // whole answer. Built key by key rather than passed through, so the
+    // object grows here on purpose and never by accident.
+    ...(device.program !== null
+      ? { program: { ...(device.program.host !== undefined ? { host: device.program.host } : {}) } }
+      : {}),
+    // **Presence is the capability once more**: only a device with panels
+    // carries the key, so the wire of every other device is byte-for-byte what
+    // it was, and an app from before panels never meets it at all. Each
+    // carries its `kind`, which an app reads as an open word and leaves off
+    // the page when it doesn't draw it.
+    ...(panels && panels.length > 0 ? { panels } : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

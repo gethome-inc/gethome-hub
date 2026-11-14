@@ -125,6 +125,9 @@ describe('the roles migration', () => {
       'hub.ai',
       // And `hub.wifi` is newer than either, granted the same way by `0017`.
       'hub.wifi',
+      // Newer than all of it — there were no cameras — and reaching a hub
+      // that already exists the same way, by an `UPDATE` in `0019`.
+      'camera.view',
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }
