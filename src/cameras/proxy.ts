@@ -194,6 +194,11 @@ export class CameraProxy {
     viewer.writeHead(200, {
       'content-type': `multipart/x-mixed-replace; boundary=${BOUNDARY}`,
       'cache-control': 'no-store',
+      // Not only hygiene: this is what delivers a picture to an Apple client
+      // when it is sent. Without it `URLSession` sniffs every part's type and
+      // keeps a part under 512 bytes until bytes arrive after it — the next
+      // frame — so a small picture is shown one frame late. Measured on macOS
+      // (`src/cameras/CLAUDE.md`); `test/cameras.test.ts` holds it here.
       'x-content-type-options': 'nosniff',
       connection: 'close',
     });

@@ -221,6 +221,42 @@ describe('camera proxy', () => {
   });
 
   /**
+   * `nosniff` on the stream is what an Apple client needs to be handed a
+   * picture when it is sent: without it `URLSession` sniffs each part's type
+   * and keeps one under 512 bytes until the next frame's bytes arrive. Each
+   * part is written whole when its frame is — head, picture, line end — with
+   * its length, and nothing of the next part is owed before it can be read.
+   */
+  it('tells a client not to sniff the parts, and writes each one whole with its length', async () => {
+    const target = { key: 'd/1/live', externalId: 'porch-cam', url: `${camera.url}/stream` };
+    const viewer = await startViewerServer(proxy, target);
+    try {
+      const { headers, body, request } = await new Promise<{
+        headers: http.IncomingHttpHeaders;
+        body: string;
+        request: http.ClientRequest;
+      }>((resolve, reject) => {
+        const request = http.get(viewer.url, (response) => {
+          // The first frame alone: what has arrived by the time its last byte has.
+          let body = '';
+          response.on('data', (chunk: Buffer) => {
+            body += chunk.toString('latin1');
+            if (body.includes(JPEG.toString('latin1'))) resolve({ headers: response.headers, body, request });
+          });
+        });
+        request.on('error', reject);
+      });
+      expect(headers['x-content-type-options']).toBe('nosniff');
+      expect(headers['content-type']).toBe('multipart/x-mixed-replace; boundary=gethomeframe');
+      const part = `--gethomeframe\r\nContent-Type: image/jpeg\r\nContent-Length: ${String(JPEG.length)}\r\n\r\n${JPEG.toString('latin1')}`;
+      expect(body.startsWith(part)).toBe(true);
+      request.destroy();
+    } finally {
+      await viewer.close();
+    }
+  });
+
+  /**
    * Access is asked before every frame, so a viewer whose access ends stops
    * on the next one and nobody else does — and the hang-up `watch` hands back
    * ends a viewer at once, which is how a revocation reaches it.
