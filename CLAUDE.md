@@ -854,8 +854,9 @@ adapter/registry/API change.
   for it. And **what a key does is written as its member, through it**: every
   activity row goes through `actor(request)`, which keeps `memberId` and
   `data.memberName` the member's and adds `via: "api"`, the key's id and name,
-  and the key in the sentence — `automation.ran` alone leaves `memberName` off,
-  and `presser` in `server.ts` says why. An explicit helper, deliberately not
+  and the key in the sentence — `automation.ran` and `device.mqtt-account`
+  leave `memberName` off, and `presser` and `accountRow` in `server.ts` say
+  why. An explicit helper, deliberately not
   AsyncLocalStorage, which would follow a key into the timers the automation
   engine sets up during its request.
   Three smaller things that bite. **The socket authenticates inside its

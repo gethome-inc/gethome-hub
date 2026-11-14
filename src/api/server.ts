@@ -4131,12 +4131,35 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     };
   };
 
-  /** How the activity log names the device an account is for. */
-  const accountSubject = (deviceId: string): string => {
+  /**
+   * An activity row about a device's account: what the sentence calls the
+   * device, the device it is filed under once there is one, and its `data`.
+   *
+   * **A line about the device, and never `data.memberName`** — `presser`'s
+   * reason exactly. An iPhone build from before this kind draws a row it has
+   * never met from `message`, titled by the device where the row names one
+   * and by `memberName` where it does not, so a row carrying it would read
+   * "Anna" over "Anna gave Desk light its own MQTT account", the name twice —
+   * and a phone keeps whichever build it has. Without it the title is the
+   * device, or "Hub" for a board that has not arrived yet, over a sentence
+   * that says who. `memberId` still makes the row the member's.
+   */
+  const accountRow = (request: FastifyRequest, deviceId: string) => {
     const device = deps.registry
       .listDevices()
       .find((candidate) => candidate.adapter === 'mqtt' && candidate.externalId === deviceId);
-    return device ? device.name : `“${deviceId}”`;
+    const who = actor(request);
+    const { memberName: _shownTwice, ...attribution } = who.data;
+    return {
+      who,
+      subject: device ? device.name : `“${deviceId}”`,
+      target: device ? { deviceId: device.id } : {},
+      data: {
+        ...attribution,
+        mqttDeviceId: deviceId,
+        ...(device ? { deviceName: device.name } : {}),
+      },
+    };
   };
 
   /**
@@ -4216,18 +4239,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Somebody *else* replacing it is a different fact — the device's account
     // changed hands — and is always written.
     if (!outcome.replacedOwn) {
-      const who = actor(request);
-      const subject = accountSubject(body.deviceId);
+      const row = accountRow(request, body.deviceId);
       await deps.activity.record({
         kind: 'device.mqtt-account',
         message: outcome.replaced
-          ? `${who.name} gave ${subject} a new password for its own MQTT account.`
-          : `${who.name} gave ${subject} its own MQTT account.`,
-        memberId: who.memberId,
+          ? `${row.who.name} gave ${row.subject} a new password for its own MQTT account.`
+          : `${row.who.name} gave ${row.subject} its own MQTT account.`,
+        memberId: row.who.memberId,
+        ...row.target,
         data: {
-          ...who.data,
+          ...row.data,
           action: outcome.replaced ? 'replace' : 'add',
-          mqttDeviceId: body.deviceId,
           ...(body.projectKey !== undefined ? { projectKey: body.projectKey } : {}),
         },
       });
@@ -4263,15 +4285,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       const { deviceId } = z
         .object({ deviceId: z.string().regex(MQTT_ACCOUNT_ID) })
         .parse(request.params);
-      const subject = accountSubject(deviceId);
       const outcome = await mqttDeviceAccounts.revoke(deviceId);
       if (outcome === undefined) return reply.code(404).send({ error: 'not_found' });
-      const who = actor(request);
+      const row = accountRow(request, deviceId);
       await deps.activity.record({
         kind: 'device.mqtt-account',
-        message: `${who.name} took away the MQTT account ${subject} had.`,
-        memberId: who.memberId,
-        data: { ...who.data, action: 'revoke', mqttDeviceId: deviceId },
+        message: `${row.who.name} took away the MQTT account ${row.subject} had.`,
+        memberId: row.who.memberId,
+        ...row.target,
+        data: { ...row.data, action: 'revoke' },
       });
       if (outcome.state === 'applied') return reply.code(204).send();
       return reply.code(202).send({ state: 'pending' });

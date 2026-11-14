@@ -824,7 +824,12 @@ Making one and taking one away each write an activity row
 the device's account changed hands. Replacing one you made yourself does not:
 the home was already told who gave that device its account, and a program
 redeployed ten times would otherwise be ten lines. An account that goes with
-its device is covered by that device's own `device.removed`.
+its device is covered by that device's own `device.removed`. The row is
+filed under the device once the device is in the home (`deviceId`, and
+`data.deviceName`), and carries `data.mqttDeviceId`, `data.action`
+(`add`, `replace`, `revoke`) and `data.projectKey` when one was given — and
+deliberately **no `data.memberName`**: the sentence says who, and an app that
+titles a row by that field would say it twice.
 
 ### Pairing a Matter accessory
 

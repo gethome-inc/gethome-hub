@@ -115,15 +115,18 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
     (
       await app.inject({ method: 'GET', url: '/api/v1/mqtt/device-accounts', headers: auth(token) })
     ).json() as { available: boolean; max: number; accounts: AccountWire[] };
-  const messages = async (): Promise<string[]> =>
+  interface AccountRow {
+    kind: string;
+    message: string;
+    memberId?: string;
+    deviceId?: string | null;
+    data?: Record<string, unknown>;
+  }
+  const rows = async (): Promise<AccountRow[]> =>
     (
-      (await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })).json() as Array<{
-        kind: string;
-        message: string;
-      }>
-    )
-      .filter((entry) => entry.kind === 'device.mqtt-account')
-      .map((entry) => entry.message);
+      (await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })).json() as AccountRow[]
+    ).filter((entry) => entry.kind === 'device.mqtt-account');
+  const messages = async (): Promise<string[]> => (await rows()).map((entry) => entry.message);
 
   const waitFor = async (label: string, check: () => boolean, timeoutMs = 5000): Promise<void> => {
     const deadline = Date.now() + timeoutMs;
@@ -283,6 +286,14 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
     expect(JSON.stringify(listed)).not.toContain('$7$');
 
     expect(await messages()).toEqual(['Anna gave “desk-light-x7k2q9” its own MQTT account.']);
+    // The row is Anna's, and says so in its sentence alone. An iPhone build
+    // that has never met this kind titles a row with no device by
+    // `data.memberName`, over the hub's sentence — which already names her.
+    const [row] = await rows();
+    expect(row!.memberId).toBeTruthy();
+    // No device to file it under yet: nothing has announced itself.
+    expect(row!.deviceId ?? null).toBeNull();
+    expect(row!.data).toEqual({ action: 'add', mqttDeviceId: 'desk-light-x7k2q9', projectKey: '9f3a11c2' });
   });
 
   it('names the device in the home once the board has arrived', async () => {
@@ -301,6 +312,15 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
       'Anna gave Desk light a new password for its own MQTT account.',
       'Georgy gave “desk-light-x7k2q9” its own MQTT account.',
     ]);
+    // Once the device is in the home the row is filed under it, so every app
+    // titles the line with the device's name.
+    const [replaced] = await rows();
+    expect(replaced!.deviceId).toBe(registry.listDevices()[0]!.id);
+    expect(replaced!.data).toEqual({
+      action: 'replace',
+      mqttDeviceId: 'desk-light-x7k2q9',
+      deviceName: 'Desk light',
+    });
   });
 
   it('says nothing more when somebody sets their own device up again', async () => {
