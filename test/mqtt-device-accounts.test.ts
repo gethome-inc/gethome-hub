@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pino } from 'pino';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { DEVICE_ID_PATTERN } from '../src/adapters/mqtt/convention.js';
 import { HubEventBus } from '../src/core/bus.js';
 import {
@@ -221,6 +222,65 @@ describe.skipIf(!handle)('the hub’s list, applied by the root script', () => {
     expect(lineAfter).not.toBe(lineBefore);
     expect(await accounts.list()).toHaveLength(1);
     expect((await accounts.get('desk-light-x7k2q9'))?.projectKey).toBe('k1');
+  });
+
+  it('keeps somebody else’s device and project theirs, unless the caller may take them over', async () => {
+    const [other] = await db.insert(members).values({ name: 'Boris', role: 'member' }).returning();
+    const boris = { id: other!.id, name: other!.name };
+    const first = await accounts.mint({ deviceId: 'front-door-aa11bb', projectKey: '9f3a11c2', member: anna });
+    if (!first.ok) throw new Error('refused');
+    const passwdBefore = passwdOf();
+
+    // Anna's device: a new password would cut her board off, and the account
+    // would speak for her front door.
+    expect(await accounts.mint({ deviceId: 'front-door-aa11bb', member: boris })).toEqual({
+      ok: false,
+      reason: 'held',
+      held: 'device',
+    });
+    // Anna's project: a made-up id with her key would reach her project's topics.
+    expect(
+      await accounts.mint({ deviceId: 'made-up-cc22dd', projectKey: '9f3a11c2', member: boris }),
+    ).toEqual({ ok: false, reason: 'held', held: 'project' });
+    // A device already in the home with no account of its own — one on the
+    // shared account, say — is somebody's too.
+    expect(await accounts.mint({ deviceId: 'old-board-ee33ff', member: boris, inHome: true })).toEqual({
+      ok: false,
+      reason: 'held',
+      held: 'device',
+    });
+    // Nothing was written by any of the three.
+    expect((await accounts.list()).map((account) => account.deviceId)).toEqual(['front-door-aa11bb']);
+    expect(passwdOf()).toBe(passwdBefore);
+
+    // Anna sets her own up again, and adds another part to her own project,
+    // with nothing more than she had.
+    expect((await accounts.mint({ deviceId: 'front-door-aa11bb', projectKey: '9f3a11c2', member: anna })).ok).toBe(true);
+    expect((await accounts.mint({ deviceId: 'hall-light-gg44hh', projectKey: '9f3a11c2', member: anna, inHome: false })).ok).toBe(true);
+    // A device she gave an account is hers even once it is in the home.
+    expect((await accounts.mint({ deviceId: 'front-door-aa11bb', member: anna, inHome: true })).ok).toBe(true);
+    // Boris's own new board in a project of his own is his.
+    expect((await accounts.mint({ deviceId: 'his-board-ii55jj', projectKey: 'b0b0b0b0', member: boris })).ok).toBe(true);
+
+    // Somebody who may remove devices may take one over, and it is theirs after.
+    const taken = await accounts.mint({ deviceId: 'front-door-aa11bb', member: boris, mayTakeOver: true });
+    if (!taken.ok) throw new Error('refused');
+    expect(taken.replacedOwn).toBe(false);
+    expect((await accounts.get('front-door-aa11bb'))?.memberId).toBe(boris.id);
+  });
+
+  it('counts an account whose member has left as nobody’s own', async () => {
+    const [other] = await db.insert(members).values({ name: 'Boris', role: 'member' }).returning();
+    const boris = { id: other!.id, name: other!.name };
+    await accounts.mint({ deviceId: 'desk-light-x7k2q9', projectKey: 'k1', member: boris });
+    await db.delete(members).where(eq(members.id, boris.id));
+    expect((await accounts.get('desk-light-x7k2q9'))?.memberId).toBeNull();
+
+    expect(await accounts.mint({ deviceId: 'desk-light-x7k2q9', member: anna })).toMatchObject({ held: 'device' });
+    expect(await accounts.mint({ deviceId: 'new-part-aa11bb', projectKey: 'k1', member: anna })).toMatchObject({
+      held: 'project',
+    });
+    expect((await accounts.mint({ deviceId: 'desk-light-x7k2q9', member: anna, mayTakeOver: true })).ok).toBe(true);
   });
 
   it('will not name a device after one of the broker’s own accounts', async () => {

@@ -481,7 +481,7 @@ there, because those reach the routes as well. `docs/api.md` and
   gethome key and nothing else — and only its sha256 is ever stored.
 - **A device's broker account is the whole list, written down, and never a
   password** (`src/core/mqtt-device-accounts.ts`; `deploy/CLAUDE.md` has the
-  root half). Six things to keep. **The id is the username**, because that is
+  root half). Seven things to keep. **The id is the username**, because that is
   what lets two static `pattern … %u` lines in the ACL confine every account
   with no rule per device — so the id pattern here must stay the adapter's
   `DEVICE_ID_PATTERN` (written out, since `core/` imports no adapter;
@@ -504,4 +504,13 @@ there, because those reach the routes as well. `docs/api.md` and
   service follows `deviceRemoved` itself** (the `FavoritesService`
   arrangement), which is why that event now carries what the device was on
   its own protocol: the row has gone by then, and an account is filed under
-  the protocol's id, not the hub's.
+  the protocol's id, not the hub's. **Somebody else's device or project is
+  `device.remove`'s** (`mayTakeOver`): a new password takes the board off
+  the broker and the account speaks for the device, so an id another member
+  gave an account (or whose member has left), one already in the home
+  (`inHome`, which only the route knows) and a project key on another
+  member's accounts are refused to a caller holding only `device.add`, inside
+  the queue and the transaction so two requests cannot both find it free.
+  An absent `mayTakeOver` is no, so a caller that forgets to ask is refused
+  rather than widened; a caller other than the route must say `inHome`
+  itself.

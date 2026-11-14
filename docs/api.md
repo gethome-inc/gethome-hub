@@ -340,7 +340,7 @@ than no button.
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /mqtt/device-accounts` | `device.add` · never a key | the devices that hold a broker account of their own: `{available, reason?, max, pending?, accounts: [{deviceId, username, projectKey, topics[], createdAt, createdBy, device}]}`. `pending` is `true` while the broker is still behind this list. **No password ever comes back** — the hub keeps only the broker's hash of each. See [below](#a-broker-account-for-each-device-mqttdevice-accounts) |
-| `POST /mqtt/device-accounts` | `device.add` · never a key | `{deviceId, projectKey?}` — give one device its own account on the broker, confined to its own topics. `201 {account, password, host, port, state: "applied"}`, the password **once**; `202` with `state: "pending"` if the machine has not applied it yet. Asking again for the same `deviceId` replaces the password. `400` for an id or key that is not letters, digits, `_` and `-` (1–64), a key that is only `-`, or a body with a field this hub does not know; `409 mqtt_device_accounts_unavailable`, `409 device_id_reserved`, `409 too_many_device_accounts {limit}`, `502 mqtt_account_not_applied {detail?}` |
+| `POST /mqtt/device-accounts` | `device.add` · never a key | `{deviceId, projectKey?}` — give one device its own account on the broker, confined to its own topics. `201 {account, password, host, port, state: "applied"}`, the password **once**; `202` with `state: "pending"` if the machine has not applied it yet. Asking again for the same `deviceId` replaces the password. `403 forbidden {permission: "device.remove", reason}` for somebody else's: `reason` is `device_held` (another member gave that device its account, or it is in the home already) or `project_held` (accounts another member made carry that `projectKey`). `400` for an id or key that is not letters, digits, `_` and `-` (1–64), a key that is only `-`, or a body with a field this hub does not know; `409 mqtt_device_accounts_unavailable`, `409 device_id_reserved`, `409 too_many_device_accounts {limit}`, `502 mqtt_account_not_applied {detail?}` |
 | `DELETE /mqtt/device-accounts/:deviceId` | `device.remove` · never a key | take a device's account away without removing the device. `204` once the broker has dropped it, `202 {state: "pending"}` if the machine has not got to it yet, `404 not_found`. **Deleting the device does this by itself** |
 | `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
 | `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
@@ -480,7 +480,14 @@ deleting the device ends it, the connection it was holding included. And it is
 named — the request writes a row saying who gave which device an account. So it
 is what adding a device already means, for a device that arrives over MQTT
 rather than over a radio; Guest is where the line falls, as it does for pairing.
-Taking an account away on its own is `device.remove`.
+Taking an account away on its own is `device.remove`, and so is **giving one to
+somebody else's device or project**: a device another member gave an account,
+a device already in the home, or a project key on accounts another member
+made. A new password takes the old account away from the board that held it,
+and the new one reaches that device's topics — its state, its commands and the
+discovery document whose withdrawal takes it out of the home — so without this
+`device.add` would quietly mean "may take over any device on the broker". Your
+own device and your own project need `device.add` alone, again and again.
 
 **`camera.view` is newer than every key above it, and Member holds it from the
 start.** Watching the porch is what living in a home with a camera on its porch
@@ -788,6 +795,15 @@ POST /api/v1/mqtt/device-accounts
   behind the list — after a `202` here, or in the two seconds a removal waits
   before its reload — and `false` once every account on it works. The field is
   there only where `available` is `true`.
+- **Somebody else's needs `device.remove`.** Setting up again a device you
+  gave an account, or another part of a project you made accounts for, needs
+  nothing beyond `device.add`. A device another member gave its account (or
+  whose member has left), a device already in the home that holds none, and a
+  `projectKey` on accounts another member made answer
+  `403 {"error": "forbidden", "permission": "device.remove", "reason": "device_held"}`
+  — or `"project_held"` — to a caller without it, the guard's own refusal with
+  a `reason` beside it. Nothing is written. An owner, and anybody whose role
+  holds `device.remove`, is never refused this way.
 - **The body is strict**, as `/api-keys` bodies are: a field this hub does not
   know is a `400`, never an account broader than the caller meant.
 - **`502 mqtt_account_not_applied`** is the machine refusing the change — its

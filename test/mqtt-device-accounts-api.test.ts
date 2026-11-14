@@ -298,20 +298,21 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
   });
 
   it('names the device in the home once the board has arrived', async () => {
-    await mint(ownerToken, { deviceId: 'desk-light-x7k2q9' });
+    await mint(memberToken, { deviceId: 'desk-light-x7k2q9' });
     adapter.bus!.deviceUpserted(board('desk-light-x7k2q9', 'Desk light'));
     await registry.flush();
     const [account] = (await list(ownerToken)).accounts;
     expect(account!.device).toEqual({ id: registry.listDevices()[0]!.id, name: 'Desk light' });
 
-    // Set up a second time by somebody else: a new password, the row says
-    // whose it is now, and the home is told the account changed hands.
-    const again = await mint(memberToken, { deviceId: 'desk-light-x7k2q9' });
+    // Set up a second time by somebody who may take a device over: a new
+    // password, the row says whose it is now, and the home is told the
+    // account changed hands.
+    const again = await mint(ownerToken, { deviceId: 'desk-light-x7k2q9' });
     expect(again.statusCode).toBe(201);
-    expect((await list(ownerToken)).accounts).toMatchObject([{ createdBy: 'Anna' }]);
+    expect((await list(ownerToken)).accounts).toMatchObject([{ createdBy: 'Georgy' }]);
     expect(await messages()).toEqual([
-      'Anna gave Desk light a new password for its own MQTT account.',
-      'Georgy gave “desk-light-x7k2q9” its own MQTT account.',
+      'Georgy gave Desk light a new password for its own MQTT account.',
+      'Anna gave “desk-light-x7k2q9” its own MQTT account.',
     ]);
     // Once the device is in the home the row is filed under it, so every app
     // titles the line with the device's name.
@@ -322,6 +323,45 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
       mqttDeviceId: 'desk-light-x7k2q9',
       deviceName: 'Desk light',
     });
+  });
+
+  it('will not let a member take over a device or a project somebody else set up', async () => {
+    // `device.add` is a plain Member's. Without this, Anna could ask for the
+    // owner's front door: its board cut off by the new password, and an
+    // account that reports its state, reads its commands and can withdraw it
+    // from the home.
+    const owners = await mint(ownerToken, { deviceId: 'front-door-aa11bb', projectKey: '9f3a11c2' });
+    const ownerPassword = (owners.json() as { password: string }).password;
+    const passwdBefore = readFileSync(m.passwd, 'utf8');
+    const refused = await mint(memberToken, { deviceId: 'front-door-aa11bb' });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toEqual({ error: 'forbidden', permission: 'device.remove', reason: 'device_held' });
+
+    // Nor a made-up id carrying the owner's project key, which the list shows her.
+    expect((await list(memberToken)).accounts[0]!.projectKey).toBe('9f3a11c2');
+    const project = await mint(memberToken, { deviceId: 'made-up-cc22dd', projectKey: '9f3a11c2' });
+    expect(project.statusCode).toBe(403);
+    expect(project.json()).toEqual({ error: 'forbidden', permission: 'device.remove', reason: 'project_held' });
+
+    // Nor a device already in the home that holds no account of its own —
+    // one wired in on the shared account, which nobody here gave her.
+    adapter.bus!.deviceUpserted(board('porch-light-dd44ee', 'Porch light'));
+    await registry.flush();
+    const inHome = await mint(memberToken, { deviceId: 'porch-light-dd44ee' });
+    expect(inHome.statusCode).toBe(403);
+    expect(inHome.json()).toEqual({ error: 'forbidden', permission: 'device.remove', reason: 'device_held' });
+
+    // Nothing moved: the owner's account, its password and the feed.
+    expect(readFileSync(m.passwd, 'utf8')).toBe(passwdBefore);
+    expect((await list(ownerToken)).accounts.map((account) => account.deviceId)).toEqual(['front-door-aa11bb']);
+    expect(await messages()).toEqual(['Georgy gave “front-door-aa11bb” its own MQTT account.']);
+    expect(ownerPassword).toMatch(/^[0-9a-f]{32}$/);
+
+    // Her own board, in a project of her own, is hers to set up and set up again.
+    expect((await mint(memberToken, { deviceId: 'her-board-ff55gg', projectKey: 'a11a11a1' })).statusCode).toBe(201);
+    expect((await mint(memberToken, { deviceId: 'her-board-ff55gg', projectKey: 'a11a11a1' })).statusCode).toBe(201);
+    // And the owner, who may remove devices, may take the porch light over.
+    expect((await mint(ownerToken, { deviceId: 'porch-light-dd44ee' })).statusCode).toBe(201);
   });
 
   it('says nothing more when somebody sets their own device up again', async () => {

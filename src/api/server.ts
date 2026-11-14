@@ -4200,6 +4200,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * one stops working — which is what setting a board up a second time needs,
    * since nothing here could hand the old one back.
    *
+   * **Somebody else's device or project needs `device.remove`.** Replacing an
+   * account takes it away from the board that held it, and the new one
+   * reaches that device's topics — its state, its commands, and the discovery
+   * document whose withdrawal takes it out of the home. So a device another
+   * member gave an account, a device already in the home with none, and a
+   * project key on accounts another member made are refused with the guard's
+   * own `403 forbidden` and that permission, plus a `reason` saying which —
+   * without it `device.add`, which a plain Member holds, would quietly mean
+   * "may take over the front door". Your own device and your own project
+   * stay yours to set up again with `device.add` alone. Asked inside the
+   * service's queue (`mint`), so two requests at once cannot both pass.
+   *
    * **`device.add`, and not `hub.mqtt`.** The shared password is the owner's
    * to hand out because nothing can take it back; this one passes the three
    * tests that put a permission in a role's default set. It is bounded — one
@@ -4225,8 +4237,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       deviceId: body.deviceId,
       projectKey: body.projectKey,
       member: { id: me.id, name: me.name },
+      mayTakeOver: can(deps.access, request, 'device.remove'),
+      inHome: deps.registry
+        .listDevices()
+        .some((device) => device.adapter === 'mqtt' && device.externalId === body.deviceId),
     });
     if (!outcome.ok) {
+      if (outcome.reason === 'held') {
+        return reply.code(403).send({
+          error: 'forbidden',
+          permission: 'device.remove',
+          reason: outcome.held === 'device' ? 'device_held' : 'project_held',
+        });
+      }
       if (outcome.reason === 'unavailable') {
         return reply.code(409).send({ error: 'mqtt_device_accounts_unavailable' });
       }
