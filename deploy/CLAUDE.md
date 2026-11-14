@@ -348,7 +348,7 @@ in `deploy/install.sh` must stay accurate.
   every run breaks every integration the owner wired in, and
   `gethome-hubctl update` is `install.sh` again. **Nothing turns authentication
   on unless every part of it landed**: mosquitto opens `password_file` and
-  `acl_file` *after* dropping privileges, so a 0600 root file is
+  `acl_file` as its own account (the next bullet), so a 0600 root file is
   `Error: Unable to open pwfile` and a broker that will not start — an open
   broker is a hole, but a dead broker is a hub with no Zigbee and no MQTT, and
   the installer must never pick the second while fixing the first, so every
@@ -380,6 +380,81 @@ in `deploy/install.sh` must stay accurate.
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **The broker's two files are the broker's own: `mosquitto`, its primary
+  group, 0600.** mosquitto reads `password_file` and `acl_file` as its own
+  account — after dropping privileges where Debian's 2.0 unit starts it as
+  root, from the start where Debian's 2.1.2 unit says `User=mosquitto` — and
+  reads them again, as that account, on every SIGHUP. From **2.0.16** it also
+  compares each file's owner and group with that account's uid and gid, and
+  any access for others, and says so at every start *and every reload*:
+  `Warning: File /etc/mosquitto/gethome.passwd owner is not mosquitto. Future
+  versions will refuse to load this file.` That was the `root:mosquitto` 0640
+  both writers used to give them. **No released broker refuses** — the
+  `return NULL` is still `#if 0` in 2.0.22, 2.1.2 and upstream's `develop` —
+  but one that did would be a broker that will not start, port 1883 closed and
+  Zigbee down, arriving by `apt upgrade` on a hub nobody touched. What each
+  supported system ships, read from the archives on 2026-11-14 (Raspberry Pi's
+  own archive carries no mosquitto, so Raspberry Pi OS is Debian's):
+  **2.0.11** in Bookworm and Ubuntu 22.04, which has no such check; **2.0.21**
+  in Trixie and bookworm-backports; **2.0.18** in Ubuntu 24.04; **2.0.22** in
+  Ubuntu 25.10 and 26.04; and **2.1.2** in forky (testing) and sid — the
+  broker heading for the next Debian, and so the next Raspberry Pi OS.
+  Measured on Ubuntu's package of each version, in a chroot of its own series
+  (Ubuntu's 2.0.21-1 and 2.1.2-3build1 are Debian's own trixie and forky
+  uploads rebuilt; Debian's archive was not reachable from where this was
+  measured), at start and after a SIGHUP, started as root and started as
+  `mosquitto`: `root:mosquitto` 0640 warns twice per file on
+  every version from 2.0.18 on; `mosquitto:mosquitto` 0640 and 0600 are
+  silent on all of them; `root:root` 0600 is a broker that cannot open its
+  password file on all of them. So both files go to `MQTT_BROKER_USER` and
+  the group `id -gn` gives for it — the gid the broker has once it is that
+  account — **0600, not 0640**, because the owner is the reader and a group
+  bit would give nobody anything; it is also what upstream's own tool creates.
+  Five things to keep. **Both writers, one ownership**: `write_broker_files`
+  in `install.sh` and `replace_broker_file` in `mqtt-accounts.sh` hand every
+  file to the same account, because install.sh tells the script which
+  (`GETHOME_MQTT_USER`, on its own run and in the unit the path starts) — a
+  file the script wrote any other way would have the broker warning again at
+  the reload that applied it. **Never `mosquitto_passwd` on the final file**:
+  run as root against a file the broker owns, it warns the mirror image
+  ("owner is not root", "group is not root"), and from **2.1 its `-c` opens
+  with `O_EXCL`** and refuses a file that exists ("File exists", exit 1) —
+  measured on 2.1.2 — which on the final name was every update after the
+  first falling back to an open broker and deleting `mqtt.env`, and the
+  passwords every integration holds with it. The installer builds
+  both files in `/etc/mosquitto/.gethome-staging`, 0700 root, emptied first
+  and gone afterwards (2.0.11's `-c` creates 0644, which that directory keeps
+  from anyone), and `gethome-hubctl uninstall` removes one an interrupted run
+  left. **Made the broker's before they take their names**: chown and chmod in
+  the staging directory, then one rename each, ACL first — so the broker never
+  finds a file it cannot read or one it warns about. **A new file, never an
+  edited one**: an upgraded hub's `root:mosquitto` pair is replaced whole on
+  the next install or update rather than inheriting anything, and the script
+  writes a new file for every rewrite too. **Every failure leaves the broker
+  open, never pointed at a bad file**: `write_broker_files` removes both final
+  files however it fails, and `MQTT_SECURED` is set by its success alone.
+  **What it costs: a file owned by the broker's account is one that account
+  can rewrite** — and chmod — where `root:mosquitto` 0640 let it only read. Code
+  running as `mosquitto` could give itself an account, widen the ACL or make
+  the hashes readable to others. That was weighed and taken, for three
+  reasons. The account *is* the broker: it already decides every sign-in and
+  carries every message, so these files hand it nothing it does not have.
+  `/etc/mosquitto` stays root's, so it can change what a file says but never
+  swap one for a link or another name, and root only ever reads these files as
+  text. And both are rewritten whole by every install and update — though the
+  accounts script copies the broker's own two password lines and the ACL above
+  its marker as it finds them, so a line changed there lasts until the next
+  update rather than the next device. The one ownership that keeps the files
+  out of the broker's hands is the one upstream has said it will stop loading.
+  A rollback keeps the new files, which every build's broker reads.
+  `test/deploy-mqtt-acl.test.ts` runs the installer's own `write_broker_files`,
+  starts a real broker on what it wrote, captures the broker's log through
+  every reload the accounts script causes, and fails on that warning — with the
+  files handed to whichever account the broker reads as in that run
+  (`brokerAccount`: `mosquitto` under root, the suite's own account otherwise),
+  and a world-readable file at the end to show the same log can speak;
+  `test/deploy-config.test.ts` and `test/mqtt-device-accounts.test.ts` pin the
+  owner and mode on both sides.
 - **A device can hold a broker account of its own, and the hub records the
   list the way it records a radio.** The two accounts above are shared: every
   board somebody set up held `gethome`, so any of them could publish another
@@ -424,7 +499,8 @@ in `deploy/install.sh` must stay accurate.
   list is checked for exactly its shape before it is used (the list is the hub
   user's file and this is root — and Raspberry Pi OS's `awk` is mawk, so the
   checks use no interval expressions), and each file is written beside its
-  name, given `root:mosquitto` 0640 *first*, and renamed into place. **A list
+  name, made the broker account's own *first* (the bullet before this one),
+  and renamed into place. **A list
   that is there and does not read as one is refused, never read as empty** —
   read as "no accounts" it would take every device's away. **Reload, not
   restart**: `systemctl reload mosquitto` is a SIGHUP, on which mosquitto

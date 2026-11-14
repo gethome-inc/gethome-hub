@@ -56,6 +56,17 @@ const ACCOUNTS_DIR = 'mqtt-accounts';
 export const MQTT_ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
+ * What a project key is here: the same alphabet, **except a lone `-`**. The
+ * list `deploy/mqtt-accounts.sh` reads writes "no project" as `-`
+ * (`account=<id> - <hash>`), so a key of `-` would be written exactly as none:
+ * the account made without the project's topics it was answered with. Refused
+ * rather than encoded some other way, because a key that is only the separator
+ * names nothing anybody would choose, and the list keeps the one shape both
+ * sides already read.
+ */
+export const MQTT_PROJECT_KEY = /^(?!-$)[A-Za-z0-9_-]{1,64}$/;
+
+/**
  * How many devices may hold an account. The root script enforces the same
  * number; this is the hub saying so before it asks. A bound because every
  * line is re-checked by the broker on each reload, and because a client stuck
@@ -324,7 +335,7 @@ export class MqttDeviceAccounts {
     member: { id: string; name: string };
   }): Promise<MintMqttAccountOutcome> {
     if (!MQTT_ACCOUNT_ID.test(input.deviceId)) throw new Error('not a device id');
-    if (input.projectKey !== undefined && !MQTT_ACCOUNT_ID.test(input.projectKey)) {
+    if (input.projectKey !== undefined && !MQTT_PROJECT_KEY.test(input.projectKey)) {
       throw new Error('not a project key');
     }
     if (!this.availability().available) return { ok: false, reason: 'unavailable' };

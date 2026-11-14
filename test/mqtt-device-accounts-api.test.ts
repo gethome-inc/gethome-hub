@@ -345,6 +345,9 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
       { deviceId: 'plus+in-it' },
       { deviceId: 'x'.repeat(65) },
       { deviceId: 'desk-light-x7k2q9', projectKey: 'not/a/key' },
+      // The list writes "no project" as `-`, so a key of `-` would make an
+      // account with none while the answer named `gethome/project/-/#`.
+      { deviceId: 'desk-light-x7k2q9', projectKey: '-' },
       // Strict: a field a later build adds to narrow an account must be a 400
       // here, never an account broader than the caller asked for.
       { deviceId: 'desk-light-x7k2q9', topics: ['gethome/#'] },

@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,39 @@ export function installerAcl(hubUser = 'gethome-hub', appUser = 'gethome'): stri
     .join(hubUser)
     .split('${MQTT_APP_USER}')
     .join(appUser);
+}
+
+/** Who a command names as `name`, or undefined where there is no such account. */
+function account(name: string): { name: string; uid: number; gid: number } | undefined {
+  try {
+    const uid = Number(execFileSync('id', ['-u', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    const gid = Number(execFileSync('id', ['-g', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    return Number.isInteger(uid) && Number.isInteger(gid) ? { name, uid, gid } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * **The account the broker reads its files as, in this run of the suite.**
+ *
+ * On a hub that is `mosquitto`, and both writers hand the two files to it and
+ * its primary group, because that is who mosquitto checks them against. Here
+ * it depends on who runs the suite. As root — and with mosquitto installed —
+ * a broker this suite starts drops to `mosquitto` exactly as a hub's does, so
+ * that is the account. As anybody else nothing drops anything: the broker
+ * runs as whoever started it, and that is the account, which is also the only
+ * one a file can be handed to without root. Either way the files are handed
+ * to the account that will read them, so what a hub's broker would say about
+ * them, this one says too.
+ */
+export function brokerAccount(): { name: string; uid: number; gid: number } {
+  const self = userInfo();
+  if (self.uid === 0) {
+    const mosquitto = account('mosquitto');
+    if (mosquitto) return mosquitto;
+  }
+  return { name: self.username, uid: self.uid, gid: self.gid };
 }
 
 export interface BrokerMachine {
@@ -77,13 +110,13 @@ export function brokerMachine(
     ).join('\n')}\n`,
   );
   writeFileSync(acl, `${installerAcl()}\n`);
-  // A broker started as root drops to its own account before it opens either
-  // file, so on a machine where the suite is root they have to be reachable by
-  // another account. The script narrows what it rewrites to 0640 and, as root,
-  // hands it to the broker's group — which is the thing being tested.
+  // As the installer leaves them: the broker account's own, and nobody else's.
+  const broker = brokerAccount();
   chmodSync(etc, 0o755);
-  chmodSync(passwd, 0o644);
-  chmodSync(acl, 0o644);
+  for (const file of [passwd, acl]) {
+    chmodSync(file, 0o600);
+    if (broker.uid !== userInfo().uid) chownSync(file, broker.uid, broker.gid);
+  }
   return { conf, data, etc, passwd, acl };
 }
 
@@ -97,8 +130,62 @@ function scriptEnv(m: BrokerMachine, env: Record<string, string>): NodeJS.Proces
     GETHOME_USER: userInfo().username,
     GETHOME_MQTT_PASSWD: m.passwd,
     GETHOME_MQTT_ACL: m.acl,
+    // And the broker's account, as install.sh tells the script on a hub.
+    GETHOME_MQTT_USER: brokerAccount().name,
     ...env,
   };
+}
+
+/**
+ * Run the installer's own `write_broker_files` on this machine's two files —
+ * the code that writes them on every install and update, not a copy of what
+ * it does — with the broker's two accounts and their passwords, and return
+ * its exit status: 0 written, 1 the password file could not be, 2 not made
+ * the broker's, 3 not put in place.
+ *
+ * `passwdTool` is the `mosquitto_passwd` to run, since the installer calls it
+ * by name and a Mac's is not on the default PATH of a child process.
+ */
+export function runInstallerBrokerFiles(
+  m: BrokerMachine,
+  options: { passwdTool: string; hubPassword: string; appPassword: string; brokerUser?: string },
+): number {
+  try {
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+         SUDO=""
+         MQTT_HUB_USER=gethome-hub
+         MQTT_APP_USER=gethome
+         MQTT_HUB_PASS="$2"
+         MQTT_APP_PASS="$3"
+         MQTT_PASSWD_FILE="$4"
+         MQTT_ACL_FILE="$5"
+         MQTT_BROKER_USER="$6"
+         for fn in mqtt_acl write_broker_files; do
+           prog="/^$fn() {/,/^}/p"
+           eval "$(sed -n "$prog" "$1")"
+         done
+         write_broker_files`,
+        'bash',
+        path.join(repoRoot, 'deploy', 'install.sh'),
+        options.hubPassword,
+        options.appPassword,
+        m.passwd,
+        m.acl,
+        options.brokerUser ?? brokerAccount().name,
+      ],
+      {
+        env: { ...process.env, PATH: `${path.dirname(options.passwdTool)}:${process.env.PATH ?? ''}` },
+        stdio: 'ignore',
+      },
+    );
+    return 0;
+  } catch (error) {
+    return (error as { status?: number }).status ?? -1;
+  }
 }
 
 /**

@@ -441,6 +441,9 @@ cmd_uninstall() {
   # The broker's accounts go too: leaving a password file behind would keep
   # refusing anonymous clients on a machine with no hub left to authenticate.
   $SUDO rm -f /etc/mosquitto/gethome.passwd /etc/mosquitto/gethome.acl
+  # And the directory install.sh builds them in, there only if a run was
+  # stopped inside it — with the broker's password hashes in it.
+  $SUDO rm -rf /etc/mosquitto/.gethome-staging
   $SUDO rm -f /etc/avahi/services/gethome-hub.service
   # The files that are not ours by directory: without them NetworkManager goes
   # on running scripts for a hub that is gone, on every association. The

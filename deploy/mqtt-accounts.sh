@@ -48,10 +48,14 @@
 #   that is not is left out, never passed through. The list is the hub user's
 #   file and this is root: nothing from it reaches a file the broker parses
 #   except as one of those two shapes.
-# * Both files are written beside their final names, given the broker's group
-#   and mode first, and renamed into place — the broker opens them after it has
-#   dropped privileges, so a file it cannot read is a broker that will not
-#   start, and a half-written one is accounts that vanished.
+# * Both files are written beside their final names, made the broker
+#   account's own first — its user, its group, 0600 — and renamed into place.
+#   The broker opens them as that account, so a file it cannot read is a
+#   broker that will not start, and a half-written one is accounts that
+#   vanished; and from 2.0.16 on it warns at every reload about a file whose
+#   owner or group is not its own, which a later release may turn into a
+#   refusal. install.sh writes them the same way (write_broker_files), and
+#   deploy/CLAUDE.md says why that ownership.
 # * Only `user` and `topic readwrite` lines are ever added to the ACL, the
 #   words the installer's own part uses.
 #
@@ -67,7 +71,10 @@ MQTT_ENV="$CONF_DIR/mqtt.env"
 HUB_USER="${GETHOME_USER:-${GETHOME_GROUP:-gethome}}"
 PASSWD_FILE="${GETHOME_MQTT_PASSWD:-/etc/mosquitto/gethome.passwd}"
 ACL_FILE="${GETHOME_MQTT_ACL:-/etc/mosquitto/gethome.acl}"
-BROKER_GROUP="${GETHOME_MQTT_GROUP:-mosquitto}"
+# The account the broker reads its files as. Both files go to it and to its
+# primary group, which is the gid the broker has once it is that account —
+# install.sh passes the same name, so the two writers cannot disagree.
+BROKER_USER="${GETHOME_MQTT_USER:-mosquitto}"
 # The hub refuses the same number (MAX_MQTT_DEVICE_ACCOUNTS).
 MAX_ACCOUNTS=250
 # Where install.sh's part of the ACL ends and this script's begins. Plain ASCII
@@ -185,21 +192,26 @@ valid_accounts() {
     }'
 }
 
-# A file under /etc/mosquitto, replaced whole: written beside its name, handed
-# to the broker's group and narrowed *before* it takes the name, so the broker
-# never finds one it cannot read and nobody else ever finds one they can.
+# A file under /etc/mosquitto, replaced whole: written beside its name, made
+# the broker account's own and narrowed *before* it takes the name, so the
+# broker never finds one it cannot read — or one it warns about — and nobody
+# else ever finds one they can. Every rewrite is a new file, so nothing of one
+# an older build left as `root:mosquitto` 0640 is inherited.
+#
+# Handed over whether or not this runs as root: the suite, which cannot give a
+# file away, names its own account as the broker's, so the files it checks are
+# ones this function really handed to somebody rather than ones it skipped.
 replace_broker_file() {
-  local target="$1" content="$2" tmp
+  local target="$1" content="$2" tmp group
+  group="$(id -gn "$BROKER_USER" 2>/dev/null)" || return 1
+  [[ -n "$group" ]] || return 1
   tmp="$(mktemp "$target.XXXXXX" 2>/dev/null)" || return 1
   if ! printf '%s\n' "$content" > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
-  if [[ "$(id -u)" == "0" ]] && ! chown "root:$BROKER_GROUP" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
-  if ! chmod 0640 "$tmp" 2>/dev/null || ! mv -f "$tmp" "$target" 2>/dev/null; then
+  if ! chown "$BROKER_USER:$group" "$tmp" 2>/dev/null || ! chmod 0600 "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$target" 2>/dev/null; then
     rm -f "$tmp"
     return 1
   fi

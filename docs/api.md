@@ -340,7 +340,7 @@ than no button.
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /mqtt/device-accounts` | `device.add` · never a key | the devices that hold a broker account of their own: `{available, reason?, max, accounts: [{deviceId, username, projectKey, topics[], createdAt, createdBy, device}]}`. **No password ever comes back** — the hub keeps only the broker's hash of each. See [below](#a-broker-account-for-each-device-mqttdevice-accounts) |
-| `POST /mqtt/device-accounts` | `device.add` · never a key | `{deviceId, projectKey?}` — give one device its own account on the broker, confined to its own topics. `201 {account, password, host, port, state: "applied"}`, the password **once**; `202` with `state: "pending"` if the machine has not applied it yet. Asking again for the same `deviceId` replaces the password. `400` for an id or key that is not letters, digits, `_` and `-` (1–64) or a body with a field this hub does not know; `409 mqtt_device_accounts_unavailable`, `409 device_id_reserved`, `409 too_many_device_accounts {limit}`, `502 mqtt_account_not_applied {detail?}` |
+| `POST /mqtt/device-accounts` | `device.add` · never a key | `{deviceId, projectKey?}` — give one device its own account on the broker, confined to its own topics. `201 {account, password, host, port, state: "applied"}`, the password **once**; `202` with `state: "pending"` if the machine has not applied it yet. Asking again for the same `deviceId` replaces the password. `400` for an id or key that is not letters, digits, `_` and `-` (1–64), a key that is only `-`, or a body with a field this hub does not know; `409 mqtt_device_accounts_unavailable`, `409 device_id_reserved`, `409 too_many_device_accounts {limit}`, `502 mqtt_account_not_applied {detail?}` |
 | `DELETE /mqtt/device-accounts/:deviceId` | `device.remove` · never a key | take a device's account away without removing the device. `204` once the broker has dropped it, `202 {state: "pending"}` if the machine has not got to it yet, `404 not_found`. **Deleting the device does this by itself** |
 | `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
 | `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
@@ -770,7 +770,8 @@ POST /api/v1/mqtt/device-accounts
   the device does: `device` is `null` until something announces itself under
   that id, and `{id, name}` of the device in the home after. Neither of the
   broker's own two names can be a device (`409 device_id_reserved`).
-- **`projectKey`** is optional, the same alphabet, and names the one
+- **`projectKey`** is optional, the same alphabet except a lone `-` (which is
+  how the hub's own list says "no project"), and names the one
   `gethome/project/<key>/…` branch this device's account may use. Without it
   the account has no project topics at all. The hub does not know what a
   project is; it records the key it was given and the broker enforces it.
@@ -803,8 +804,9 @@ still writes all of `gethome/`. The way to close that is to give every device
 its own account and then rotate the shared one (`gethome-hubctl mqtt --rotate`),
 which no longer strands a device that holds an account of its own.
 
-**How it reaches the broker.** The password file and the ACL are root's, and
-the hub's account cannot touch either. So the hub writes its whole list of
+**How it reaches the broker.** The password file and the ACL belong to the
+broker's own account and only root writes them, and the hub's account cannot
+touch either. So the hub writes its whole list of
 accounts — a name, a project key and a hash each, never a password — into
 `<data>/mqtt-accounts/`, `gethome-mqtt-accounts.path` notices, and
 `deploy/mqtt-accounts.sh` rebuilds the two files and has mosquitto read them
