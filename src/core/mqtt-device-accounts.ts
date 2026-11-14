@@ -121,6 +121,13 @@ export type MintMqttAccountOutcome =
       /** The device already had an account, and this one took its place. */
       replaced: boolean;
       /**
+       * …and it was this same member who gave it the one it had. Setting your
+       * own board up again says nothing the home has not already been told,
+       * which is why a caller logs the first account and somebody else's
+       * replacement, and not this.
+       */
+      replacedOwn: boolean;
+      /**
        * `applied` once the broker has read the new list. `pending` when the
        * root script did not answer inside the wait: the account is recorded
        * and still on its way, which a slow board makes ordinary.
@@ -385,6 +392,7 @@ export class MqttDeviceAccounts {
         account: record(written.row),
         password,
         replaced: written.previous !== undefined,
+        replacedOwn: written.previous !== undefined && written.previous.memberId === input.member.id,
         state: result !== undefined ? 'applied' : 'pending',
       } as const;
     });

@@ -292,7 +292,8 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
     const [account] = (await list(ownerToken)).accounts;
     expect(account!.device).toEqual({ id: registry.listDevices()[0]!.id, name: 'Desk light' });
 
-    // Set up a second time: a new password, and the row says whose it is now.
+    // Set up a second time by somebody else: a new password, the row says
+    // whose it is now, and the home is told the account changed hands.
     const again = await mint(memberToken, { deviceId: 'desk-light-x7k2q9' });
     expect(again.statusCode).toBe(201);
     expect((await list(ownerToken)).accounts).toMatchObject([{ createdBy: 'Anna' }]);
@@ -300,6 +301,19 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
       'Anna gave Desk light a new password for its own MQTT account.',
       'Georgy gave “desk-light-x7k2q9” its own MQTT account.',
     ]);
+  });
+
+  it('says nothing more when somebody sets their own device up again', async () => {
+    // A program deployed for the tenth time is given a fresh password each
+    // time. The home was told who gave it an account the first time; nine
+    // more lines saying so would bury what the feed is for.
+    const first = await mint(memberToken, { deviceId: 'tide-table-m3n4p5' });
+    const second = await mint(memberToken, { deviceId: 'tide-table-m3n4p5' });
+    const third = await mint(memberToken, { deviceId: 'tide-table-m3n4p5', projectKey: '9f3a11c2' });
+    expect([first.statusCode, second.statusCode, third.statusCode]).toEqual([201, 201, 201]);
+    const passwords = [first, second, third].map((response) => (response.json() as { password: string }).password);
+    expect(new Set(passwords).size).toBe(3);
+    expect(await messages()).toEqual(['Anna gave “tide-table-m3n4p5” its own MQTT account.']);
   });
 
   it('refuses a body it does not wholly understand, and an id no device can have', async () => {

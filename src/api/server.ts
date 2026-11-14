@@ -4208,21 +4208,30 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
       });
     }
-    const who = actor(request);
-    const subject = accountSubject(body.deviceId);
-    await deps.activity.record({
-      kind: 'device.mqtt-account',
-      message: outcome.replaced
-        ? `${who.name} gave ${subject} a new password for its own MQTT account.`
-        : `${who.name} gave ${subject} its own MQTT account.`,
-      memberId: who.memberId,
-      data: {
-        ...who.data,
-        action: outcome.replaced ? 'replace' : 'add',
-        mqttDeviceId: body.deviceId,
-        ...(body.projectKey !== undefined ? { projectKey: body.projectKey } : {}),
-      },
-    });
+    // **Your own, again, is not logged** — the sign-in code's rule, and for
+    // its reason. The row that matters is the one saying who gave this device
+    // an account, and it is already there; a board set up a second time, or a
+    // program deployed for the tenth, by the person who set it up the first
+    // time, would be a line each in a feed somebody reads a week later.
+    // Somebody *else* replacing it is a different fact — the device's account
+    // changed hands — and is always written.
+    if (!outcome.replacedOwn) {
+      const who = actor(request);
+      const subject = accountSubject(body.deviceId);
+      await deps.activity.record({
+        kind: 'device.mqtt-account',
+        message: outcome.replaced
+          ? `${who.name} gave ${subject} a new password for its own MQTT account.`
+          : `${who.name} gave ${subject} its own MQTT account.`,
+        memberId: who.memberId,
+        data: {
+          ...who.data,
+          action: outcome.replaced ? 'replace' : 'add',
+          mqttDeviceId: body.deviceId,
+          ...(body.projectKey !== undefined ? { projectKey: body.projectKey } : {}),
+        },
+      });
+    }
     const broker = mqttAccess({
       config: deps.mqtt,
       requestHost: hostFromRequest(request.headers.host),

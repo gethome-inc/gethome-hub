@@ -819,9 +819,12 @@ lines outright. Using the device's id as its client id, as the convention's
 own examples do, is always safe.
 
 At most 250 devices hold an account (`max` in the list and on `GET /hub`).
-Making, replacing and taking one away each write an activity row
-(`device.mqtt-account`); an account that goes with its device is covered by
-that device's own `device.removed`.
+Making one and taking one away each write an activity row
+(`device.mqtt-account`), and so does replacing one **somebody else** made —
+the device's account changed hands. Replacing one you made yourself does not:
+the home was already told who gave that device its account, and a program
+redeployed ten times would otherwise be ten lines. An account that goes with
+its device is covered by that device's own `device.removed`.
 
 ### Pairing a Matter accessory
 
