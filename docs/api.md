@@ -134,7 +134,9 @@ no query string reaches the hub's log either way.
   **any permission a later build adds**, until somebody decides it is grantable.
   Those routes answer `403 {error:"key_not_allowed", permission}`. And a few
   routes are the member's and never a key's, with no permission named:
-  `POST /invites`, `PATCH`/`DELETE /members/me`, every `/api-keys` route, a
+  `POST /invites`, `PATCH`/`DELETE /members/me`, every `/api-keys` route,
+  every `/mqtt/device-accounts` route (a broker account is a credential, and a
+  key mints none and ends none), a
   device's [panels](#panels) (`/devices/:id/panels/…` — a panel is code
   every phone in the house runs, which is more than `device.edit` hands a key
   anywhere else, and its files are for the apps' panel host), and
@@ -257,7 +259,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry). `automations: {status: true, devices: true, problems: true, origin: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on — and, with `problems`, that [marks the steps of a run that were a problem](#what-a-run-says), and, with `origin`, that every rule says [who added it and how](#where-a-rule-came-from). `cameras: {kinds, maxStreams, maxStreamsPerKey}` and `panels: {perDevice, kinds: {web: {maxBytes, maxFiles}}}` are the same answer for [cameras](#cameras) and [panels](#panels): what this hub relays and how many at once (and how many of those one API key may open — newer than the rest of the block), and which kinds of panel it keeps — each with its own bounds — and how many a device holds. A hub without them has never heard of either, so an app offers neither; a client offers a kind of panel only where `panels.kinds` names it |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `mqtt: {deviceAccounts: {available, reason?, max}}` is present on a hub that can give each device [its own broker account](#a-broker-account-for-each-device-mqttdevice-accounts) — `available: false` with `reason: "not-installed"` when this machine cannot — and an app that does not find `available: true` there hands a board the shared `gethome` account from `GET /settings/mqtt`, as before. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry). `automations: {status: true, devices: true, problems: true, origin: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on — and, with `problems`, that [marks the steps of a run that were a problem](#what-a-run-says), and, with `origin`, that every rule says [who added it and how](#where-a-rule-came-from). `cameras: {kinds, maxStreams, maxStreamsPerKey}` and `panels: {perDevice, kinds: {web: {maxBytes, maxFiles}}}` are the same answer for [cameras](#cameras) and [panels](#panels): what this hub relays and how many at once (and how many of those one API key may open — newer than the rest of the block), and which kinds of panel it keeps — each with its own bounds — and how many a device holds. A hub without them has never heard of either, so an app offers neither; a client offers a kind of panel only where `panels.kinds` names it |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -337,6 +339,9 @@ than no button.
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
+| `GET /mqtt/device-accounts` | `device.add` · never a key | the devices that hold a broker account of their own: `{available, reason?, max, accounts: [{deviceId, username, projectKey, topics[], createdAt, createdBy, device}]}`. **No password ever comes back** — the hub keeps only the broker's hash of each. See [below](#a-broker-account-for-each-device-mqttdevice-accounts) |
+| `POST /mqtt/device-accounts` | `device.add` · never a key | `{deviceId, projectKey?}` — give one device its own account on the broker, confined to its own topics. `201 {account, password, host, port, state: "applied"}`, the password **once**; `202` with `state: "pending"` if the machine has not applied it yet. Asking again for the same `deviceId` replaces the password. `400` for an id or key that is not letters, digits, `_` and `-` (1–64), a key that is only `-`, or a body with a field this hub does not know; `409 mqtt_device_accounts_unavailable`, `409 device_id_reserved`, `409 too_many_device_accounts {limit}`, `502 mqtt_account_not_applied {detail?}` |
+| `DELETE /mqtt/device-accounts/:deviceId` | `device.remove` · never a key | take a device's account away without removing the device. `204` once the broker has dropped it, `202 {state: "pending"}` if the machine has not got to it yet, `404 not_found`. **Deleting the device does this by itself** |
 | `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
 | `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
 | `DELETE /settings/wifi/networks/:id` | `hub.wifi` | forget a network. **`409 wifi_network_connected` for the one the hub is on now** — never offered behind a confirmation, because it would take the hub off its only network. `404 not_found`, and the same `409`s as above |
@@ -465,6 +470,17 @@ than a spending decision, which is why the argument that moved `hub.update` and
 `hub.ai` does not reach it. A home that wants it otherwise grants `hub.mqtt` in
 the matrix — the safe half, since the account it reveals cannot switch anything
 on — and leaves `hub.mqtt.admin` where it is.
+
+**Giving one device its own broker account is `device.add`, not either of
+those**, and that is the same test coming out the ordinary way. The account
+[`POST /mqtt/device-accounts`](#a-broker-account-for-each-device-mqttdevice-accounts)
+makes is bounded — it reaches that device's own topics and nothing else. It
+destroys nothing, and unlike the shared password it *can* be taken back:
+deleting the device ends it, the connection it was holding included. And it is
+named — the request writes a row saying who gave which device an account. So it
+is what adding a device already means, for a device that arrives over MQTT
+rather than over a radio; Guest is where the line falls, as it does for pairing.
+Taking an account away on its own is `device.remove`.
 
 **`camera.view` is newer than every key above it, and Member holds it from the
 start.** Watching the porch is what living in a home with a camera on its porch
@@ -689,6 +705,133 @@ a token can, so the home should be able to see afterwards who was handed one.
 Rotating is `gethome-hubctl mqtt --rotate` on the machine itself — root work,
 like the radio and the update, and the only real answer to "somebody who had
 the password has left".
+
+### A broker account for each device (`/mqtt/device-accounts`)
+
+The `gethome` account above is one password for everything somebody wires in,
+and it may write anywhere under `gethome/`. That is right for a bench and
+wrong for a house full of boards: every one of them could publish another
+device's state, discovery document or commands, and a board that was switched
+off while it was deleted came back when it was switched on, because the
+password it held still worked.
+
+So a hub can give **each device an account of its own**. The account is named
+for the device — the username is the device's id on the
+[MQTT convention](mqtt-integrations.md), the one in its topics — and it reaches
+that device's topics and nothing else:
+
+| | a device's own account |
+|---|---|
+| Username | the device's id, e.g. `desk-light-x7k2q9` |
+| Publish and subscribe | `gethome/device/<id>/#` and `gethome/discovery/<id>/#` |
+| With `projectKey` | also `gethome/project/<key>/#` — that one project's [own topics](mqtt-integrations.md#a-projects-own-topics-gethomeprojectkey), and no other project's |
+| Never | another device's topics, the rest of `gethome/`, anything under `zigbee2mqtt/` — reading included |
+| Ends | when the device is deleted, or `DELETE /mqtt/device-accounts/:deviceId` |
+
+It is in the shape an [API key](#api-keys) has. **The password is in the answer
+to the `POST` and nowhere afterwards** — the hub keeps the broker's own hash of
+it, so an app hands it straight to the board and a board that loses it is set
+up again. **Asking again for the same device replaces it**: the old password
+stops working and the broker drops whatever was still connected with it.
+**Deleting the device ends the account** — `DELETE /devices/:id`, or a device
+that withdraws its own discovery document — and the broker hangs up on the
+board if it is connected, about two seconds after the home lets go of it so
+that a board listening to its own config topic hears *why* first. A board that
+was switched off at the time finds its password refused when it comes back.
+
+```http
+POST /api/v1/mqtt/device-accounts
+{"deviceId": "desk-light-x7k2q9", "projectKey": "9f3a11c2"}
+
+201
+{
+  "account": {
+    "deviceId": "desk-light-x7k2q9",
+    "username": "desk-light-x7k2q9",
+    "projectKey": "9f3a11c2",
+    "topics": [
+      "gethome/device/desk-light-x7k2q9/#",
+      "gethome/discovery/desk-light-x7k2q9/#",
+      "gethome/project/9f3a11c2/#"
+    ],
+    "createdAt": "2026-11-14T08:00:00.000Z",
+    "createdBy": "Anna",
+    "device": null
+  },
+  "password": "5f0c…32 hex characters",
+  "host": "192.168.1.20",
+  "port": 1883,
+  "state": "applied"
+}
+```
+
+- **`deviceId`** is chosen by whoever sets the device up, before the device has
+  ever spoken — 1–64 letters, digits, `_` and `-`. The account can exist before
+  the device does: `device` is `null` until something announces itself under
+  that id, and `{id, name}` of the device in the home after. Neither of the
+  broker's own two names can be a device (`409 device_id_reserved`).
+- **`projectKey`** is optional, the same alphabet except a lone `-` (which is
+  how the hub's own list says "no project"), and names the one
+  `gethome/project/<key>/…` branch this device's account may use. Without it
+  the account has no project topics at all. The hub does not know what a
+  project is; it records the key it was given and the broker enforces it.
+- **`host` and `port`** are where to point the device, worked out as
+  `GET /settings/mqtt` works them out — so an app that may add devices needs
+  nothing from that route, and no `hub.mqtt`, to set one up.
+- **`state`** is `applied` once the broker has read the new account, which is
+  the ordinary answer and takes well under a second. `pending` (with `202`)
+  means the machine had not got to it within the wait: the account is recorded
+  and on its way, and the password is still handed over, because it exists
+  nowhere else. A board given it simply retries until the broker knows it.
+- **The body is strict**, as `/api-keys` bodies are: a field this hub does not
+  know is a `400`, never an account broader than the caller meant.
+- **`502 mqtt_account_not_applied`** is the machine refusing the change — its
+  sentence is in `detail` — and nothing is kept: no row, no account, and a
+  device that already had one keeps the one it had.
+
+**Ask `GET /hub` for `mqtt.deviceAccounts.available` first.** A hub from before
+this answers these routes `404`, and one whose installer could not set them up
+— a broker that asks for no password, or an installer older than the hub build
+— answers `available: false` there and `409 mqtt_device_accounts_unavailable`
+here. Either way an app gives the board the shared `gethome` account, which
+every hub with a password still has and which works exactly as it did.
+
+**The shared account is unchanged, and so is what it can do.** Boards set up
+before this hold it, and hand-wired devices are still told to use it. That is
+worth being exact about: a device's own account confines *that device* — it
+does not protect its topics from somebody holding the shared password, which
+still writes all of `gethome/`. The way to close that is to give every device
+its own account and then rotate the shared one (`gethome-hubctl mqtt --rotate`),
+which no longer strands a device that holds an account of its own.
+
+**How it reaches the broker.** The password file and the ACL belong to the
+broker's own account and only root writes them, and the hub's account cannot
+touch either. So the hub writes its whole list of
+accounts — a name, a project key and a hash each, never a password — into
+`<data>/mqtt-accounts/`, `gethome-mqtt-accounts.path` notices, and
+`deploy/mqtt-accounts.sh` rebuilds the two files and has mosquitto read them
+again; mosquitto re-checks every connected client as it does, which is what
+ends a deleted device's connection. `<data>/mqtt-accounts/enabled`, written by
+the installer beside the unit, is the capability. Every device's own topics are
+two static lines in the ACL (`pattern readwrite gethome/device/%u/#` and the
+same for `discovery`), where `%u` is the name a client signed in with; only a
+project's line is written per device. **A device must therefore sign in under
+a client id with no `+` or `#` in it** — mosquitto refuses those the pattern
+lines outright. Using the device's id as its client id, as the convention's
+own examples do, is always safe.
+
+At most 250 devices hold an account (`max` in the list and on `GET /hub`).
+Making one and taking one away each write an activity row
+(`device.mqtt-account`), and so does replacing one **somebody else** made —
+the device's account changed hands. Replacing one you made yourself does not:
+the home was already told who gave that device its account, and a program
+redeployed ten times would otherwise be ten lines. An account that goes with
+its device is covered by that device's own `device.removed`. The row is
+filed under the device once the device is in the home (`deviceId`, and
+`data.deviceName`), and carries `data.mqttDeviceId`, `data.action`
+(`add`, `replace`, `revoke`) and `data.projectKey` when one was given — and
+deliberately **no `data.memberName`**: the sentence says who, and an app that
+titles a row by that field would say it twice.
 
 ### Pairing a Matter accessory
 
@@ -3305,6 +3448,7 @@ kinds with nothing to add.
 The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
 `device.portrait`, `device.offline-expected`, `device.panel`,
+`device.mqtt-account`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.signed-in`, `member.signin-code`,
 `member.left`, `member.removed`,

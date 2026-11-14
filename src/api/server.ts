@@ -110,6 +110,14 @@ import { ownIPv4Addresses, proofAddress, proveIdentity } from '../core/hub-proof
 import type { HubWifiView } from '../core/device-network.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
+import {
+  MAX_MQTT_DEVICE_ACCOUNTS,
+  MQTT_ACCOUNT_ID,
+  MQTT_PROJECT_KEY,
+  MqttDeviceAccounts,
+  mqttAccountTopics,
+  type MqttDeviceAccount,
+} from '../core/mqtt-device-accounts.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
 import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
@@ -280,6 +288,19 @@ export interface ApiDeps {
    * single most misleading thing this route could say.
    */
   mqtt: MqttBrokerConfig;
+  /**
+   * The devices that hold a broker account of their own
+   * (`core/mqtt-device-accounts.ts`). Optional: the process that owns the
+   * clock builds one so it can settle the list at start and stop its timer at
+   * the end; a suite leaves it out and the server builds its own from the same
+   * database and data directory.
+   */
+  mqttDeviceAccounts?: MqttDeviceAccounts;
+  /**
+   * How long a device-account change waits for the root script before it
+   * answers `pending`. Optional so a suite can make it short.
+   */
+  mqttAccountApplyWaitMs?: number;
   /**
    * The broker tap behind the apps' traffic inspector. Absent when the MQTT
    * adapter is off, in which case the `mqtt` WebSocket stream is simply not
@@ -643,6 +664,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const apiKeys = new ApiKeyService(deps.db);
   const principal = requirePrincipal({ pairing: deps.pairing, apiKeys, access: deps.access });
 
+  /** A broker account for each device — `core/mqtt-device-accounts.ts`. */
+  const mqttDeviceAccounts =
+    deps.mqttDeviceAccounts ??
+    new MqttDeviceAccounts({
+      db: deps.db,
+      dataDir: deps.dataDir,
+      events: deps.events,
+      reserved: [deps.mqtt.username, deps.mqtt.integrationUsername],
+      log: deps.log.child({ module: 'mqtt-accounts' }),
+      ...(deps.mqttAccountApplyWaitMs !== undefined ? { applyWaitMs: deps.mqttAccountApplyWaitMs } : {}),
+    });
+
   /**
    * The floor: any member of this home, whatever their role.
    *
@@ -917,6 +950,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const hubStatus = createHubStatusReader(deps);
   const wifiNetworksCapability = wifiAvailability(deps.dataDir);
+  const mqttDeviceAccountsCapability = {
+    ...mqttDeviceAccounts.availability(),
+    max: MAX_MQTT_DEVICE_ACCOUNTS,
+  };
 
   /** No credential at all — the health check, the claim, and the proof. */
   const open = { config: { apiKey: 'public' as const } };
@@ -1003,6 +1040,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // installer writes it and then restarts the hub, so it cannot change
     // underneath a running one, and this route must not touch the disk.
     wifiNetworks: wifiNetworksCapability,
+    // Additive, and presence is the capability: a hub carrying this block has
+    // `/mqtt/device-accounts`, so an app setting a board up may ask for that
+    // board's **own** broker account — confined to its own topics, gone when
+    // the device is deleted — instead of handing it the one every device
+    // shared. `available: false` says this machine cannot: an installer from
+    // before this, or a broker that asks for no password. An app that does not
+    // find `available: true` here gives the board the `gethome` account from
+    // `GET /settings/mqtt`, exactly as before. Read once, at start, for the
+    // reason `wifiNetworks` is: the installer writes it and then restarts the
+    // hub, and this route must not touch the disk.
+    mqtt: { deviceAccounts: mqttDeviceAccountsCapability },
     // Additive, and presence is the capability: a hub carrying this block has
     // `/api-keys`, so an app may offer to make a key and an agent may tell the
     // person it is helping that this hub can be given one. `grantable` is what
@@ -4060,6 +4108,198 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     });
     return answer;
   });
+
+  // ── A broker account for each device ─────────────────────────────────────
+
+  /**
+   * A device's account as an app draws it — never its password, which is in
+   * the answer to the request that made it and nowhere afterwards. `device` is
+   * the device in the home this account belongs to, or null while a board that
+   * was given one has not announced itself yet.
+   */
+  const deviceAccountWire = (account: MqttDeviceAccount) => {
+    const device = deps.registry
+      .listDevices()
+      .find((candidate) => candidate.adapter === 'mqtt' && candidate.externalId === account.deviceId);
+    return {
+      deviceId: account.deviceId,
+      username: account.deviceId,
+      projectKey: account.projectKey,
+      topics: mqttAccountTopics(account.deviceId, account.projectKey),
+      createdAt: account.createdAt,
+      createdBy: account.memberName,
+      device: device ? { id: device.id, name: device.name } : null,
+    };
+  };
+
+  /**
+   * An activity row about a device's account: what the sentence calls the
+   * device, the device it is filed under once there is one, and its `data`.
+   *
+   * **A line about the device, and never `data.memberName`** — `presser`'s
+   * reason exactly. An iPhone build from before this kind draws a row it has
+   * never met from `message`, titled by the device where the row names one
+   * and by `memberName` where it does not, so a row carrying it would read
+   * "Anna" over "Anna gave Desk light its own MQTT account", the name twice —
+   * and a phone keeps whichever build it has. Without it the title is the
+   * device, or "Hub" for a board that has not arrived yet, over a sentence
+   * that says who. `memberId` still makes the row the member's.
+   */
+  const accountRow = (request: FastifyRequest, deviceId: string) => {
+    const device = deps.registry
+      .listDevices()
+      .find((candidate) => candidate.adapter === 'mqtt' && candidate.externalId === deviceId);
+    const who = actor(request);
+    const { memberName: _shownTwice, ...attribution } = who.data;
+    return {
+      who,
+      subject: device ? device.name : `“${deviceId}”`,
+      target: device ? { deviceId: device.id } : {},
+      data: {
+        ...attribution,
+        mqttDeviceId: deviceId,
+        ...(device ? { deviceName: device.name } : {}),
+      },
+    };
+  };
+
+  /**
+   * The devices that hold a broker account of their own — who gave each one
+   * its account and when, and never a password.
+   *
+   * `device.add`, like making one: it is the list of what that permission
+   * handed out. No key reads it, the `hub.mqtt` reasoning — what is on the
+   * broker and under which name is the home's own plumbing.
+   */
+  app.get('/api/v1/mqtt/device-accounts', memberOnlyNeeds('device.add'), async () => ({
+    ...mqttDeviceAccountsCapability,
+    accounts: (await mqttDeviceAccounts.list()).map(deviceAccountWire),
+  }));
+
+  /**
+   * Give a device its own account on the broker, for whoever is setting that
+   * device up to hand to it. The password is in this answer and nowhere else,
+   * ever: the hub keeps the broker's hash of it.
+   *
+   * The account is named for the device — `deviceId` is the id it announces
+   * itself under on the MQTT convention, and its broker username — and it
+   * reaches that device's own topics and nothing else: not another device's
+   * state or commands, not Zigbee, and of `gethome/project/…` only the one
+   * project `projectKey` names. Deleting the device takes it away.
+   *
+   * **Asking again for the same device replaces the password**, and the old
+   * one stops working — which is what setting a board up a second time needs,
+   * since nothing here could hand the old one back.
+   *
+   * **`device.add`, and not `hub.mqtt`.** The shared password is the owner's
+   * to hand out because nothing can take it back; this one passes the three
+   * tests that put a permission in a role's default set. It is bounded — one
+   * device's own topics. It destroys nothing, and removing the device ends
+   * it, the live connection included. And it is named: this writes a row
+   * saying who gave which device an account. Never through an API key, which
+   * mints no credential of any kind.
+   *
+   * **The body is strict**, the `/api-keys` reasoning: a narrowing field a
+   * later build adds must be a 400 here rather than an account broader than
+   * the caller asked for.
+   */
+  app.post('/api/v1/mqtt/device-accounts', memberOnlyNeeds('device.add'), async (request, reply) => {
+    const body = z
+      .object({
+        deviceId: z.string().regex(MQTT_ACCOUNT_ID),
+        projectKey: z.string().regex(MQTT_PROJECT_KEY).optional(),
+      })
+      .strict()
+      .parse(request.body ?? {});
+    const me = request.member!;
+    const outcome = await mqttDeviceAccounts.mint({
+      deviceId: body.deviceId,
+      projectKey: body.projectKey,
+      member: { id: me.id, name: me.name },
+    });
+    if (!outcome.ok) {
+      if (outcome.reason === 'unavailable') {
+        return reply.code(409).send({ error: 'mqtt_device_accounts_unavailable' });
+      }
+      if (outcome.reason === 'reserved') return reply.code(409).send({ error: 'device_id_reserved' });
+      if (outcome.reason === 'limit') {
+        return reply
+          .code(409)
+          .send({ error: 'too_many_device_accounts', limit: MAX_MQTT_DEVICE_ACCOUNTS });
+      }
+      return reply.code(502).send({
+        error: 'mqtt_account_not_applied',
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+      });
+    }
+    // **Your own, again, is not logged** — the sign-in code's rule, and for
+    // its reason. The row that matters is the one saying who gave this device
+    // an account, and it is already there; a board set up a second time, or a
+    // program deployed for the tenth, by the person who set it up the first
+    // time, would be a line each in a feed somebody reads a week later.
+    // Somebody *else* replacing it is a different fact — the device's account
+    // changed hands — and is always written.
+    if (!outcome.replacedOwn) {
+      const row = accountRow(request, body.deviceId);
+      await deps.activity.record({
+        kind: 'device.mqtt-account',
+        message: outcome.replaced
+          ? `${row.who.name} gave ${row.subject} a new password for its own MQTT account.`
+          : `${row.who.name} gave ${row.subject} its own MQTT account.`,
+        memberId: row.who.memberId,
+        ...row.target,
+        data: {
+          ...row.data,
+          action: outcome.replaced ? 'replace' : 'add',
+          ...(body.projectKey !== undefined ? { projectKey: body.projectKey } : {}),
+        },
+      });
+    }
+    const broker = mqttAccess({
+      config: deps.mqtt,
+      requestHost: hostFromRequest(request.headers.host),
+      canUseIntegrations: false,
+      canUseFullAccess: false,
+    });
+    return reply.code(outcome.state === 'applied' ? 201 : 202).send({
+      account: deviceAccountWire(outcome.account),
+      password: outcome.password,
+      host: broker.host,
+      port: broker.port,
+      state: outcome.state,
+    });
+  });
+
+  /**
+   * Take a device's account away without taking the device out of the home —
+   * for a board that was given one and never arrived, or one to cut off now.
+   * Deleting the device does this by itself.
+   *
+   * `device.remove`, because what it does to the device is that permission's
+   * own sentence: the board is off the broker, and nothing in the apps undoes
+   * it short of setting the board up again.
+   */
+  app.delete(
+    '/api/v1/mqtt/device-accounts/:deviceId',
+    memberOnlyNeeds('device.remove'),
+    async (request, reply) => {
+      const { deviceId } = z
+        .object({ deviceId: z.string().regex(MQTT_ACCOUNT_ID) })
+        .parse(request.params);
+      const outcome = await mqttDeviceAccounts.revoke(deviceId);
+      if (outcome === undefined) return reply.code(404).send({ error: 'not_found' });
+      const row = accountRow(request, deviceId);
+      await deps.activity.record({
+        kind: 'device.mqtt-account',
+        message: `${row.who.name} took away the MQTT account ${row.subject} had.`,
+        memberId: row.who.memberId,
+        ...row.target,
+        data: { ...row.data, action: 'revoke' },
+      });
+      if (outcome.state === 'applied') return reply.code(204).send();
+      return reply.code(202).send({ state: 'pending' });
+    },
+  );
 
   /**
    * Pick the radio on a board that can only afford one.

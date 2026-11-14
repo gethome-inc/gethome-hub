@@ -167,10 +167,13 @@ describe('deploy/install.sh', () => {
     const resolve = (raw: string): string =>
       raw.replace(/^"|"$/g, '').replace(/\$\{?(\w+)\}?/g, (whole, name: string) => variables.get(name) ?? whole);
 
-    // What the installer writes for the broker, and what the broker is told to open.
-    const written = [...installer.matchAll(/tee\s+(\S+)\s+>\/dev\/null\s+<<'?MOSQ\w*'?$/gm)].map(([, target]) =>
-      resolve(target!),
-    );
+    // What the installer writes for the broker — the drop-in from its own
+    // heredocs, the password file and the ACL by renaming each into place —
+    // and what the broker is told to open.
+    const written = [
+      ...[...installer.matchAll(/tee\s+(\S+)\s+>\/dev\/null\s+<<'?MOSQ\w*'?$/gm)].map(([, target]) => resolve(target!)),
+      ...[...installer.matchAll(/mv -f "\$stage\/\w+" ("\$MQTT_\w+_FILE")/g)].map(([, target]) => resolve(target!)),
+    ];
     const directives = /^\s*(password_file|acl_file|psk_file|include_dir|cafile|capath|certfile|keyfile|crlfile)\s+(\S+)/gm;
     const opened = ['MOSQ', 'MOSQ_OPEN'].flatMap((delimiter) =>
       [...heredoc(delimiter).matchAll(directives)].map(([, directive, file]) => ({
@@ -179,7 +182,7 @@ describe('deploy/install.sh', () => {
       })),
     );
     // Found at all, or this would pass on an installer it can no longer read.
-    expect(written.length, 'no broker file written from a <<MOSQ… heredoc').toBeGreaterThanOrEqual(3);
+    expect(written.length, 'the broker’s files are no longer found in install.sh').toBeGreaterThanOrEqual(4);
     expect(opened.map((entry) => entry.directive)).toEqual(expect.arrayContaining(['password_file', 'acl_file']));
 
     const readable = (file: string): boolean =>
@@ -208,6 +211,51 @@ describe('deploy/install.sh', () => {
    * and fall back, rather than leave the drop-in pointing at a file nobody can
    * read.
    */
+  /**
+   * **The broker's two files are the broker's own.** mosquitto opens them as
+   * its own account, and from 2.0.16 on it also checks their owner and group
+   * against that account, warning at every start and every reload — "owner is
+   * not mosquitto. Future versions will refuse to load this file" — about the
+   * `root:mosquitto` 0640 this used to write. A release that refuses would be a
+   * hub whose broker does not start after an `apt upgrade`, so both files go to
+   * the account and its primary group, 0600. What a broker says about the
+   * result is `deploy-mqtt-acl.test.ts`, which runs this function and has one
+   * read them; this pins how it gets there.
+   */
+  it('writes the broker its files as its own, before they take their names', () => {
+    const start = installer.indexOf('write_broker_files() {');
+    expect(start, 'install.sh no longer writes the broker its files in one place').toBeGreaterThan(0);
+    const write = installer.slice(start, installer.indexOf('\n}\n', start));
+
+    expect(installer).toMatch(/^MQTT_BROKER_USER="mosquitto"$/m);
+    // Its primary group, which is the gid the broker has once it is that
+    // account — dropped to as root or started as it by `User=`.
+    expect(write).toMatch(/group="\$\(id -gn "\$MQTT_BROKER_USER" 2>\/dev\/null\)"/);
+    expect(write).toMatch(/\$SUDO chown "\$MQTT_BROKER_USER:\$group" "\$stage\/passwd" "\$stage\/acl"/);
+    expect(write).toMatch(/\$SUDO chmod 0600 "\$stage\/passwd" "\$stage\/acl"/);
+    expect(installer).not.toMatch(/chown root:mosquitto/);
+
+    // Built in a directory of root's beside the two files — so renaming them
+    // is a rename — and made the broker's there, before either takes its name.
+    expect(write).toMatch(/stage="\$\{MQTT_PASSWD_FILE%\/\*\}\/\.gethome-staging"/);
+    expect(write).toMatch(/\$SUDO mkdir -m 0700 "\$stage"/);
+    expect(write.indexOf('chmod 0600')).toBeLessThan(write.indexOf('mv -f'));
+    expect(write).toMatch(/mv -f "\$stage\/acl" "\$MQTT_ACL_FILE"/);
+    expect(write).toMatch(/mv -f "\$stage\/passwd" "\$MQTT_PASSWD_FILE"/);
+
+    // `mosquitto_passwd -c` only ever on a name that does not exist yet: from
+    // 2.1 it opens with O_EXCL and refuses one that does ("File exists"), which
+    // on the final name would be every update after the first falling back to
+    // an open broker. The staging directory is emptied first for the same
+    // reason.
+    expect(write).toMatch(/mosquitto_passwd -c -b "\$stage\/passwd"/);
+    expect(installer).not.toMatch(/mosquitto_passwd -c[^\n]*\$MQTT_PASSWD_FILE/);
+    expect(write.indexOf('rm -rf "$stage"')).toBeLessThan(write.indexOf('mkdir -m 0700'));
+
+    // However it fails, neither final file is left for the drop-in to name.
+    expect(write).toMatch(/\$SUDO rm -f "\$MQTT_PASSWD_FILE" "\$MQTT_ACL_FILE"/);
+  });
+
   it('refuses to switch the broker to passwords unless every part of it landed', () => {
     const section = installer.slice(
       installer.indexOf('# ── Mosquitto ──'),
@@ -217,13 +265,12 @@ describe('deploy/install.sh', () => {
 
     // Nothing is written on the strength of `mosquitto_passwd` existing.
     expect(section).toMatch(/command -v mosquitto_passwd/);
-    // The broker's own account has to be able to read both files, and failing
-    // that is a reason to stay open rather than a warning to skip past.
-    expect(section).toMatch(/chown root:mosquitto/);
-    expect(section).toMatch(/chmod 0640/);
-    // Three places can give up, and each has to clear the flag.
-    expect(section.match(/MQTT_SECURED=""/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
-    expect(section).toMatch(/MQTT_SECURED=1/);
+    // Off until every part of it has landed: the flag starts empty, and the
+    // one line that sets it is the success of the function that writes both
+    // files — every way that can fail leaves it empty and the broker open.
+    expect(section).toMatch(/^MQTT_SECURED=""$/m);
+    expect(section.match(/MQTT_SECURED=1/g)).toHaveLength(1);
+    expect(section).toMatch(/if write_broker_files; then\n\s+MQTT_SECURED=1\n/);
     // The drop-in, the credentials file and the ACL are all behind it.
     expect(section).toMatch(/if \[\[ -n "\$MQTT_SECURED" \]\]; then/);
 
@@ -730,6 +777,168 @@ describe('deploy/install.sh', () => {
       // Installed is not running: a machine with nmcli and the daemon off is
       // one where every change would fail, so it is asked whether it answers.
       expect(before).toMatch(/nmcli -t general status/);
+    });
+  });
+
+  /**
+   * A broker account for each device (`src/core/mqtt-device-accounts.ts`,
+   * `deploy/mqtt-accounts.sh`). What the broker does with the files is
+   * `test/deploy-mqtt-acl.test.ts`, on a real one; this is the part only the
+   * installer can get wrong, and each of these is a way a hub that installed
+   * perfectly would have no working broker, or boards that stop working.
+   */
+  describe('device accounts on the broker', () => {
+    const acl = heredoc('MOSQACL');
+    const merge = installer.slice(
+      installer.indexOf('# ── A device that holds its own account keeps it across this run'),
+      installer.indexOf('# ── Add nothing the distribution'),
+    );
+    const units = installer.slice(
+      installer.indexOf('manage_mqtt_device_accounts() {'),
+      installer.indexOf('MQTT_ACCOUNTS_UNITS=""'),
+    );
+    const accountsPath = units.slice(
+      units.indexOf('gethome-mqtt-accounts.path >/dev/null <<UNIT'),
+      units.indexOf('gethome-mqtt-accounts.service >/dev/null <<UNIT'),
+    );
+    const accountsService = units.slice(units.indexOf('gethome-mqtt-accounts.service >/dev/null <<UNIT'));
+    const script = readFileSync(path.join(repoRoot, 'deploy', 'mqtt-accounts.sh'), 'utf8');
+
+    it('confines every device account with two lines, in words every broker parses', () => {
+      // `%u` is the name a client signed in with, so these are every device's
+      // own topics and no line is written per device.
+      expect(acl).toMatch(/^pattern readwrite gethome\/device\/%u\/#$/m);
+      expect(acl).toMatch(/^pattern readwrite gethome\/discovery\/%u\/#$/m);
+      // Still only the three verbs: a word an older broker does not know is a
+      // fatal parse error, which is a hub with no Zigbee and no MQTT.
+      for (const line of acl.split('\n')) {
+        if (line === '' || line.startsWith('#')) continue;
+        expect(line, line).toMatch(/^(user \S+|(topic|pattern) (read|write|readwrite) \S+)$/);
+      }
+      expect(acl).not.toMatch(/\bdeny\b/);
+    });
+
+    it('ends its ACL on the line the root script writes below', () => {
+      // The script keeps everything down to this line and replaces what
+      // follows; an ACL without it is one the script refuses to touch, so a
+      // marker that moved or changed is device accounts silently off.
+      expect(acl.split('\n').at(-1)).toBe('# gethome:device-accounts');
+      expect(script).toMatch(/^ACL_MARKER='# gethome:device-accounts'$/m);
+    });
+
+    it('puts the devices back after writing the password file afresh, and before the broker restarts', () => {
+      // `mosquitto_passwd -c` begins the file again on every update. The
+      // devices go back from the hub's list in between, or every board in the
+      // home is refused the moment its hub is updated.
+      const fresh = installer.indexOf('if write_broker_files; then');
+      const back = installer.indexOf('bash "$HUB_DIR/deploy/mqtt-accounts.sh" --no-reload --quiet');
+      const restart = installer.indexOf('systemctl restart mosquitto');
+      expect(fresh).toBeGreaterThan(0);
+      expect(back).toBeGreaterThan(fresh);
+      expect(restart).toBeGreaterThan(back);
+      // Told which account the data directory belongs to, like every script
+      // that reads it; and unable to stop the install.
+      expect(merge).toMatch(/GETHOME_CONF="\$CONF_DIR" GETHOME_USER="\$SERVICE_USER"/);
+      expect(merge).toMatch(/mqtt-accounts\.sh" --no-reload --quiet >\/dev\/null 2>&1 \|\| true/);
+      // The hub's note of what was applied goes first, as the hub's account,
+      // so a run that could not happen is asked for again at the hub's start.
+      expect(merge).toMatch(/as_service_user rm -f "\$\{DATA_DIR\}\/mqtt-accounts\/result"/);
+      expect(merge.indexOf('mqtt-accounts/result')).toBeLessThan(merge.indexOf('--no-reload'));
+    });
+
+    it('offers device accounts only where the broker asks for a password and stores one as the hub writes it', () => {
+      // The hub writes a device's line itself — `$7$`, PBKDF2-SHA512 — so no
+      // password ever crosses to root. Where the broker's own tool wrote
+      // anything else, the hub does not know the form, and says it cannot.
+      expect(merge).toMatch(/if \[\[ -n "\$MQTT_SECURED" \]\]; then/);
+      expect(merge).toContain('substr($2, 1, 3) == "$7$"');
+      expect(merge).toMatch(/MQTT_DEVICE_ACCOUNTS=1/);
+      expect(units).toMatch(/\[\[ -n "\$MQTT_DEVICE_ACCOUNTS" \]\] \|\| return 0/);
+      // And the capability is taken away before that decision, so a hub whose
+      // broker has since been left open stops offering what it cannot apply.
+      const off = units.indexOf('as_service_user rm -f "$accounts_dir/enabled"');
+      expect(off).toBeGreaterThan(0);
+      expect(off).toBeLessThan(units.indexOf('[[ -n "$MQTT_DEVICE_ACCOUNTS" ]]'));
+    });
+
+    it('hands the broker its files the way the installer does', () => {
+      // Two writers, one ownership: the installer tells the script which
+      // account the broker is — on its own run and in the unit the path starts
+      // — and the script hands every file it rewrites to that account and its
+      // primary group, 0600, exactly as `write_broker_files` does. A file the
+      // script wrote any other way would have the broker warning again at the
+      // very reload that applied it.
+      expect(merge).toMatch(/GETHOME_MQTT_USER="\$MQTT_BROKER_USER"/);
+      expect(accountsService).toMatch(/^Environment=GETHOME_MQTT_USER=\$\{MQTT_BROKER_USER\}$/m);
+      expect(script).toMatch(/^BROKER_USER="\$\{GETHOME_MQTT_USER:-mosquitto\}"$/m);
+      expect(script).toMatch(/group="\$\(id -gn "\$BROKER_USER" 2>\/dev\/null\)"/);
+      expect(script).toMatch(/chown "\$BROKER_USER:\$group" "\$tmp"/);
+      expect(script).toMatch(/chmod 0600 "\$tmp"/);
+      expect(script).not.toMatch(/root:\$BROKER_GROUP|chmod 0640/);
+    });
+
+    it('watches the file the hub actually writes', () => {
+      // `src/core/mqtt-device-accounts.ts` writes `<data>/mqtt-accounts/request`.
+      expect(units).toMatch(/local accounts_dir="\$\{DATA_DIR\}\/mqtt-accounts"/);
+      expect(accountsPath).toMatch(/^PathModified=\$\{accounts_dir\}\/request$/m);
+      expect(accountsPath).toMatch(/^Unit=gethome-mqtt-accounts\.service$/m);
+    });
+
+    it('never runs the service at boot, never parks it, and enables the path unit that starts it', () => {
+      expect(accountsService).not.toMatch(/^\[Install\]$/m);
+      expect(installer).not.toMatch(/systemctl enable[^\n]*gethome-mqtt-accounts\.service/);
+      expect(installer).toMatch(/systemctl enable --now gethome-mqtt-accounts\.path/);
+      // In [Unit], where systemd reads it: five boards set up in ten seconds
+      // would otherwise park the service and the path unit with it, and a
+      // device deleted after that would keep its account.
+      const unitSection = accountsService.slice(
+        accountsService.indexOf('[Unit]'),
+        accountsService.indexOf('[Service]'),
+      );
+      expect(unitSection).toMatch(/^StartLimitIntervalSec=0$/m);
+      expect(accountsService).toMatch(/^ExecStart=\$\{helper\} --quiet$/m);
+      expect(accountsService).toMatch(/^Environment=GETHOME_USER=\$\{SERVICE_USER\}$/m);
+      expect(units).toContain('"$HUB_DIR/deploy/mqtt-accounts.sh"');
+    });
+
+    it('writes inside the hub’s directory only as the hub’s account', () => {
+      for (const line of units.split('\n')) {
+        if (!/\$SUDO\b/.test(line) || !/accounts_dir/.test(line)) continue;
+        expect(line.trim(), line).toMatch(/^\$SUDO chown -R "\$SERVICE_USER:\$SERVICE_USER" /);
+      }
+      expect(units).toMatch(/as_service_user mkdir -p "\$accounts_dir"/);
+      expect(units).toMatch(/as_service_user touch "\$accounts_dir\/enabled"/);
+      expect(units).toMatch(/as_service_user chmod 0750 "\$accounts_dir"/);
+    });
+
+    it('has a root script that never fails its unit and never changes the hub’s files as root', () => {
+      // Always 0: a list that could not be applied is not a failed unit.
+      // (The one `exit 1` in the file is the inner shell's that writes the
+      // answer as the hub's account, indented inside its own quotes.)
+      expect(script.trimEnd().split('\n').at(-1)).toBe('exit 0');
+      expect(script).not.toMatch(/^exit [1-9]/m);
+      expect(script).not.toMatch(/^set -[a-z]*e/m);
+      // Everything under the data directory is read and written through
+      // `as_hub`; the only chown and chmod are of the temporary file that
+      // becomes one of the broker's two.
+      for (const line of script.split('\n')) {
+        if (line.trim().startsWith('#')) continue;
+        if (/\b(chown|chmod)\b/.test(line)) expect(line, line).toContain('"$tmp"');
+        if (/(LIST_FILE|REQUEST_FILE|RESULT_FILE)/.test(line) && /\b(cat|head|test|sed)\b/.test(line)) {
+          expect(line, line).toMatch(/as_hub|read_hub_file/);
+        }
+      }
+    });
+
+    it('is taken off the machine with the hub', () => {
+      const hubctl = readFileSync(path.join(repoRoot, 'deploy', 'gethome-hubctl'), 'utf8');
+      expect(hubctl).toContain('gethome-mqtt-accounts.path');
+      expect(hubctl).toContain('/usr/local/lib/gethome-mqtt-accounts.sh');
+      // And whatever an interrupted install left where it builds the broker's
+      // two files, which holds the broker's password hashes.
+      expect(hubctl).toContain('rm -rf /etc/mosquitto/.gethome-staging');
+      expect(installer).toMatch(/stage="\$\{MQTT_PASSWD_FILE%\/\*\}\/\.gethome-staging"/);
+      expect(installer).toMatch(/^MQTT_PASSWD_FILE="\/etc\/mosquitto\/gethome\.passwd"$/m);
     });
   });
 

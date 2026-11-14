@@ -398,6 +398,20 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
       ['GET', '/api/v1/settings/mqtt', 'hub.mqtt', undefined],
+      // A device's own account on the broker. Giving a board one is adding a
+      // device, and so is reading who was given one; taking one away is what
+      // removing a device does to it. The guard runs before the handler, so an
+      // account that does not exist still proves the refusal. Both allowed
+      // halves are in `test/mqtt-device-accounts-api.test.ts`, which has the
+      // root script to apply them.
+      ['GET', '/api/v1/mqtt/device-accounts', 'device.add', undefined],
+      [
+        'POST',
+        '/api/v1/mqtt/device-accounts',
+        'device.add',
+        { deviceId: 'desk-light-x7k2q9' } as object,
+      ],
+      ['DELETE', '/api/v1/mqtt/device-accounts/desk-light-x7k2q9', 'device.remove', undefined],
       // Where the hub has been, and where it may go next. Reading the list is
       // the key too, not the floor: it names other people's homes. The guard
       // runs before the handler, so a network that does not exist still
