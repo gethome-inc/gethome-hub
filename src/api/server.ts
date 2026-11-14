@@ -113,6 +113,7 @@ import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt
 import {
   MAX_MQTT_DEVICE_ACCOUNTS,
   MQTT_ACCOUNT_ID,
+  MQTT_PROJECT_KEY,
   MqttDeviceAccounts,
   mqttAccountTopics,
   type MqttDeviceAccount,
@@ -4206,7 +4207,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const body = z
       .object({
         deviceId: z.string().regex(MQTT_ACCOUNT_ID),
-        projectKey: z.string().regex(MQTT_ACCOUNT_ID).optional(),
+        projectKey: z.string().regex(MQTT_PROJECT_KEY).optional(),
       })
       .strict()
       .parse(request.body ?? {});

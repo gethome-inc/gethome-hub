@@ -8,6 +8,7 @@ import { HubEventBus } from '../src/core/bus.js';
 import {
   MAX_MQTT_DEVICE_ACCOUNTS,
   MQTT_ACCOUNT_ID,
+  MQTT_PROJECT_KEY,
   MqttDeviceAccounts,
   brokerPasswordHash,
   mqttAccountTopics,
@@ -89,6 +90,19 @@ describe('what an account is', () => {
       'gethome/discovery/desk-light-x7k2q9/#',
       'gethome/project/9f3a11c2/#',
     ]);
+  });
+
+  it('takes a project key in the same alphabet, except the list’s own “no project”', () => {
+    // `account=<id> - <hash>` is a device with no project, so a key of `-`
+    // would be written as none — the account made without the topics the hub
+    // answered with. Every other key in the alphabet is still a key, a dash
+    // inside one or two of them included.
+    for (const key of ['9f3a11c2', 'k1', '_', '--', '-a', 'a-', 'x'.repeat(64)]) {
+      expect(MQTT_PROJECT_KEY.test(key), key).toBe(true);
+    }
+    for (const key of ['-', '', 'a/b', 'a+b', 'x'.repeat(65)]) {
+      expect(MQTT_PROJECT_KEY.test(key), key).toBe(false);
+    }
   });
 
   it('is offered only where the installer said this machine applies the list', () => {
@@ -182,6 +196,16 @@ describe.skipIf(!handle)('the hub’s list, applied by the root script', () => {
     // Everything install.sh wrote is still there, untouched, above the line.
     expect(aclOf()).toContain('user gethome-hub\ntopic readwrite #');
     expect(aclOf()).toContain('pattern readwrite gethome/device/%u/#');
+  });
+
+  it('refuses a project key the list would write as no project at all', async () => {
+    // Asked of the service as well as the route: a caller that is not the
+    // route must not be able to make an account whose list line says `-`.
+    await expect(
+      accounts.mint({ deviceId: 'desk-light-x7k2q9', projectKey: '-', member: anna }),
+    ).rejects.toThrow('not a project key');
+    expect(await accounts.get('desk-light-x7k2q9')).toBeUndefined();
+    expect(aclOf()).not.toContain('desk-light-x7k2q9');
   });
 
   it('replaces the password when the same device is set up again', async () => {
