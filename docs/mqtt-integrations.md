@@ -42,8 +42,8 @@ internet: don't forward 1883 through your router.
 ### A device's own account
 
 `gethome` is one password for everything you wire in, which is what you want
-on a bench. A hub can also give **one device an account of its own**, and an
-app that sets a device up for you asks for one when the hub offers it
+on a bench. A hub can also give **one device an account of its own**, which an
+app that sets a device up for you can ask it for where the hub offers it
 (`mqtt.deviceAccounts` on `GET /hub`,
 [`api.md`](api.md#a-broker-account-for-each-device-mqttdevice-accounts)):
 
