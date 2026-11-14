@@ -202,12 +202,75 @@ gethome/device/greenhouse/set  ←  {"type":"toggle"}
 
 Both are spelled out in [references/capabilities.md](references/capabilities.md).
 
+## When the device is a camera
+
+A board or a computer that takes pictures — an ESP32-CAM, a Raspberry Pi with
+a camera — is an ordinary device of the kind `camera` that also serves a
+still, a live stream or both over plain HTTP on the home's network, and says
+where, **retained**, on its camera topic:
+
+```text
+gethome/device/<deviceId>/camera  →  {"streams":[{"id":"still","kind":"snapshot","url":"http://192.168.1.31/snapshot"}]}
+```
+
+- **Never declare the capability `camera`.** The hub adds it when it reads the
+  announcement, and a document that names it is refused whole.
+- **The address** is plain `http://` to the device's own private IPv4 address,
+  in numbers: no name, no `https`, no password in it, and never the hub's own
+  machine.
+- **The hub fetches nothing until the device proves which one it is**:
+  `GET /gethome/id` at that address has to answer `{"id":"<deviceId>"}` with
+  this device's id.
+- Publish the announcement again when the address changes, and an empty
+  retained payload to stop being a camera.
+- The pages take no password, so anything on the home's network can fetch
+  them. Say so to the person before the camera goes up.
+
+The whole of it — what each page has to answer, the limits, a camera in
+Python, what to add on an ESP32-CAM, and why one did not appear — is in
+[references/cameras.md](references/cameras.md).
+
+## When the device is a program
+
+A bridge, a script or a service that is the device — code running on a
+computer, rather than firmware on a board — can say so, and the hub tells the
+gethome apps that it is a program and which computer it runs on. Publish a
+JSON object, **retained**, on every connection, beside the heartbeat:
+
+```text
+gethome/device/<deviceId>/program  →  {"host":"nuc.local"}
+```
+
+- `host` is the **name of the computer** the program runs on, for people to
+  read — its hostname is the usual answer. At most 120 characters; a longer
+  one is cut. It is optional: an object with no keys says "a program" and
+  names no computer.
+- **Never an address for the hub to connect to, and never a secret**: the hub
+  connects to nothing named here, and everything signed in with the `gethome`
+  account can read the topic.
+- Send only `host`. The hub passes over keys it does not know, so anything
+  else is dropped rather than shown.
+- An **empty retained payload** takes it back, and the device is hardware
+  again. A payload that is not a JSON object, or a `host` that is not a
+  string, is ignored with a line in the hub's log; the device stays as it was.
+- **Firmware on a board never publishes it.** A hub from before this ignores
+  the topic, and the device works there like any other — which is why it is a
+  topic of its own: the same fact as a key in the discovery document would be
+  refused whole.
+
 ## Removing a device
 
 Publish an **empty retained payload** to its config topic (and to its state
 and availability topics, to clear what the broker holds). The hub deletes the
 device, and its name, room and history go with it. Publishing the document
 again later makes a new device.
+
+**The hub does the same when somebody deletes the device in an app**: it
+clears the retained document, and the heartbeat, camera and program topics
+with it, so the device does not come back when the hub next starts. A device
+subscribed to its own config topic hears that as a live, empty message — its
+cue to stop announcing itself until it is set up again. Its own retained
+document arriving on that subscription is not a deletion.
 
 ## Rules for an agent writing firmware
 
@@ -226,6 +289,7 @@ again later makes a new device.
 
 - [references/convention.md](references/convention.md) — the whole contract: topics, documents, patches, commands, what the broker account may do
 - [references/capabilities.md](references/capabilities.md) — every capability: what to declare, what to report, which commands arrive, units, and recipes for common devices
+- [references/cameras.md](references/cameras.md) — a device that serves pictures: the announcement, the address the hub will fetch, the proof it asks for, a camera in Python and on an ESP32-CAM
 - [references/esphome.md](references/esphome.md) — an ESPHome relay and sensor, YAML only
 - [references/arduino.md](references/arduino.md) — ESP32 with PubSubClient and ArduinoJson
 - [references/micropython.md](references/micropython.md) — Raspberry Pi Pico W or ESP32 with `umqtt.simple`

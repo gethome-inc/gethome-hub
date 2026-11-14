@@ -14,6 +14,7 @@
  *   gethome/device/<deviceId>/set              hub → device: canonical command JSON (endpoint 1)
  *   gethome/device/<deviceId>/set/<epId>       hub → device: per-endpoint command
  *   gethome/device/<deviceId>/camera[/<epId>]  retained JSON — the streams a camera serves on the LAN
+ *   gethome/device/<deviceId>/program          retained JSON — the device is a program, and on which computer
  *
  * Publishing an empty retained payload to the config topic removes the device.
  * The hub publishes one itself when the device is deleted in an app, which a
@@ -30,6 +31,7 @@ export type ParsedMqttTopic =
   | { kind: 'availability'; deviceId: string }
   | { kind: 'heartbeat'; deviceId: string }
   | { kind: 'camera'; deviceId: string; endpointId: number }
+  | { kind: 'program'; deviceId: string }
   | null;
 
 export function parseTopic(topic: string): ParsedMqttTopic {
@@ -60,6 +62,9 @@ export function parseTopic(topic: string): ParsedMqttTopic {
       if (!Number.isInteger(endpointId) || endpointId < 0) return null;
       return { kind: 'camera', deviceId, endpointId };
     }
+    if (parts[3] === 'program' && parts.length === 4) {
+      return { kind: 'program', deviceId };
+    }
   }
   return null;
 }
@@ -84,6 +89,10 @@ export function cameraTopic(deviceId: string, endpointId: number): string {
     : `${MQTT_NAMESPACE}/device/${deviceId}/camera/${endpointId}`;
 }
 
+export function programTopic(deviceId: string): string {
+  return `${MQTT_NAMESPACE}/device/${deviceId}/program`;
+}
+
 export function subscriptionPatterns(): string[] {
   return [
     `${MQTT_NAMESPACE}/discovery/+/config`,
@@ -93,5 +102,6 @@ export function subscriptionPatterns(): string[] {
     `${MQTT_NAMESPACE}/device/+/heartbeat`,
     `${MQTT_NAMESPACE}/device/+/camera`,
     `${MQTT_NAMESPACE}/device/+/camera/+`,
+    `${MQTT_NAMESPACE}/device/+/program`,
   ];
 }

@@ -38,7 +38,7 @@ it. The hub's `docs/device-schema.md` is canonical.
 `irRemote` exists too, but its code library is kept by the hub and is not
 covered by this skill. `camera` is the hub's to add and never yours to
 declare: a device that serves pictures announces its streams on its camera
-topic (the hub's `docs/mqtt-integrations.md`, *Cameras*), and the hub gives
+topic ([cameras.md](cameras.md)), and the hub gives
 that endpoint the capability itself — a discovery document naming it is
 refused whole.
 

@@ -170,9 +170,10 @@ describe.skipIf(!handle)('hub API', () => {
       // stop, with nothing on the way back to say so.
       pairing: { signInCodes: true },
       // Presence again, and both say what an app needs to know before it
-      // offers anything: the stream kinds the hub relays and how many cameras
-      // at once, and the kinds of panel it keeps with how big each may be.
-      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4 },
+      // offers anything: the stream kinds the hub relays, how many cameras at
+      // once and how many of those one API key may open, and the kinds of
+      // panel it keeps with how big each may be.
+      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4, maxStreamsPerKey: 1 },
       panels: { perDevice: 4, kinds: { web: { maxBytes: 512 * 1024, maxFiles: 64 } } },
     });
   });
@@ -456,6 +457,86 @@ describe.skipIf(!handle)('hub API', () => {
     ).toBe(204);
     expect(await wireOf()).not.toHaveProperty('panels');
     await registry.removeDevice(device.id);
+  });
+
+  /**
+   * A device that said it is a program — a script, a bridge or a service on a
+   * computer rather than a board. **Presence is the answer**: the key is on
+   * the wire of a device that said so and of no other, which is what keeps
+   * every board, every Zigbee and Matter device and every app from before
+   * this exactly where they were. On the route and on the socket, since a
+   * change reaches an open app as an ordinary `deviceUpserted`.
+   */
+  it('puts `program` on a device’s wire only when it said it is one, with the computer it named', async () => {
+    const board = {
+      adapter: 'mqtt' as const,
+      externalId: 'tide-table',
+      suggestedName: 'Tide table',
+      endpoints: [{ endpointId: 1, deviceKind: 'sensor' as const, capabilities: ['custom' as const], primary: 'custom' as const }],
+    };
+    adapter.bus!.deviceUpserted(board);
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'tide-table')!;
+    const wireOf = async () =>
+      ((await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })).json() as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.id === device.id,
+      )!;
+    // Absent, not null and not empty, for a device that never said so.
+    expect(await wireOf()).not.toHaveProperty('program');
+
+    const { socket, frames } = await openSocket(memberToken);
+    /** The `program` of the next `deviceUpserted` frame for this device — `'absent'` when it has no key. */
+    const nextFrame = async (after: number): Promise<unknown> => {
+      const isOurs = (frame: Record<string, unknown>) =>
+        frame.type === 'deviceUpserted' && (frame.device as { id?: string } | undefined)?.id === device.id;
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const frame = frames.slice(after).find(isOurs);
+        if (frame) {
+          const wire = frame.device as Record<string, unknown>;
+          return 'program' in wire ? wire.program : 'absent';
+        }
+        if (Date.now() > deadline) throw new Error('timed out waiting for the device’s deviceUpserted frame');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+
+    try {
+      // It says so, naming the computer.
+      let mark = frames.length;
+      adapter.bus!.deviceUpserted({ ...board, program: { host: 'nuc.local' } });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({ host: 'nuc.local' });
+      expect(await nextFrame(mark)).toEqual({ host: 'nuc.local' });
+
+      // A program on a computer it didn't name: the key with nothing in it,
+      // and no `host` at all rather than a null or an empty one.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted({ ...board, program: {} });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({});
+      expect(await nextFrame(mark)).toEqual({});
+
+      // Only what the hub reads goes out, whatever an adapter handed over.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted({
+        ...board,
+        program: { host: 'attic-pi', internal: 'not-for-the-wire' } as { host: string },
+      });
+      await registry.flush();
+      expect((await wireOf()).program).toEqual({ host: 'attic-pi' });
+      expect(await nextFrame(mark)).toEqual({ host: 'attic-pi' });
+
+      // Taken back: the device is hardware again, and every app hears it.
+      mark = frames.length;
+      adapter.bus!.deviceUpserted(board);
+      await registry.flush();
+      expect(await wireOf()).not.toHaveProperty('program');
+      expect(await nextFrame(mark)).toBe('absent');
+    } finally {
+      socket.close();
+      await registry.removeDevice(device.id);
+    }
   });
 
   it('serves devices announced by adapters in the wire shape', async () => {

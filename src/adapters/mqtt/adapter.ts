@@ -1,5 +1,11 @@
 import mqtt from 'mqtt';
-import type { AdapterBus, AdapterDeviceDescriptor, CameraSource, ProtocolAdapter } from '../adapter.js';
+import type {
+  AdapterBus,
+  AdapterDeviceDescriptor,
+  CameraSource,
+  DeviceProgram,
+  ProtocolAdapter,
+} from '../adapter.js';
 import {
   mqttDiscoverySchema,
   statePatchSchema,
@@ -7,8 +13,17 @@ import {
   type HubCommand,
   type MqttDiscoveryConfig,
 } from '../../schema/index.js';
-import { cameraTopic, commandTopic, configTopic, heartbeatTopic, parseTopic, subscriptionPatterns } from './convention.js';
+import {
+  cameraTopic,
+  commandTopic,
+  configTopic,
+  heartbeatTopic,
+  parseTopic,
+  programTopic,
+  subscriptionPatterns,
+} from './convention.js';
 import { HeartbeatWatch, readHeartbeat } from './heartbeat.js';
+import { readProgram, sameProgram } from './program.js';
 import type { Logger } from '../../logging.js';
 import { brokerCredentials } from '../../mqtt-auth.js';
 import { publicStream, readCameraAnnouncement, type CameraStreamSource } from '../../cameras/policy.js';
@@ -39,6 +54,12 @@ const HEARTBEAT_SWEEP_MS = 5_000;
 const MAX_PENDING_CAMERAS = 64;
 
 /**
+ * The same for the program topic: what a device said about being a program
+ * before the hub had met it, kept until its discovery document arrives.
+ */
+const MAX_PENDING_PROGRAMS = 64;
+
+/**
  * Generic MQTT integrations following the GetHome convention
  * (src/adapters/mqtt/convention.ts). Because both directions use the
  * canonical schema, this adapter is also the reference implementation —
@@ -57,6 +78,13 @@ export class MqttAdapter implements ProtocolAdapter {
    * them off the card and out of every backup.
    */
   private readonly cameras = new Map<string, Map<number, CameraStreamSource[]>>();
+  /**
+   * The devices that said they are a program, and what each said — **in
+   * memory only**, like the cameras and for the same reason: the program
+   * topic is retained, so the broker hands it back after a restart. A device
+   * with no entry is hardware as far as the hub knows (`program.ts`).
+   */
+  private readonly programs = new Map<string, DeviceProgram>();
   /** Devices that said how often they speak, and whether they still do (`heartbeat.ts`). */
   private readonly heartbeats: HeartbeatWatch;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -105,9 +133,9 @@ export class MqttAdapter implements ProtocolAdapter {
 
   /**
    * Deleted in an app: clear the device's retained discovery document — and
-   * its camera and heartbeat topics — so it doesn't come back on the next
-   * boot, and so a device listening to its own config topic hears that it was
-   * removed.
+   * its camera, heartbeat and program topics — so it doesn't come back on the
+   * next boot, and so a device listening to its own config topic hears that it
+   * was removed.
    *
    * The id leaves `known` **first**: our own subscription hears the empty
    * config a moment later, and finding nothing to remove is what keeps that
@@ -117,6 +145,7 @@ export class MqttAdapter implements ProtocolAdapter {
     const config = this.known.get(externalId);
     this.known.delete(externalId);
     this.cameras.delete(externalId);
+    this.programs.delete(externalId);
     this.heartbeats.forget(externalId);
     // Not a quiet success: the retained config is what would bring the device
     // back on the next start, and the registry keeps it waiting until it goes.
@@ -125,6 +154,7 @@ export class MqttAdapter implements ProtocolAdapter {
     const topics = [
       configTopic(externalId),
       heartbeatTopic(externalId),
+      programTopic(externalId),
       ...[...endpointIds].map((id) => cameraTopic(externalId, id)),
     ];
     await Promise.all(topics.map((topic) => this.client!.publishAsync(topic, '', { qos: 1, retain: true })));
@@ -152,6 +182,7 @@ export class MqttAdapter implements ProtocolAdapter {
         if (payload.trim() === '') {
           // Empty retained config = the integration removed the device.
           this.heartbeats.forget(parsed.deviceId);
+          this.programs.delete(parsed.deviceId);
           if (this.known.delete(parsed.deviceId)) {
             this.cameras.delete(parsed.deviceId);
             this.bus?.deviceRemoved('mqtt', parsed.deviceId);
@@ -251,6 +282,12 @@ export class MqttAdapter implements ProtocolAdapter {
         if (this.known.has(parsed.deviceId)) this.noteHeard(parsed.deviceId, live);
         return;
       }
+
+      case 'program': {
+        this.programAnnounced(parsed.deviceId, payload);
+        if (this.known.has(parsed.deviceId)) this.noteHeard(parsed.deviceId, live);
+        return;
+      }
     }
   }
 
@@ -332,17 +369,58 @@ export class MqttAdapter implements ProtocolAdapter {
   }
 
   /**
+   * A device said it is a program, or took that back with an empty payload.
+   *
+   * Kept for a device the hub hasn't met yet as well — retained messages
+   * arrive in whatever order the broker holds them, and this one can come
+   * before the discovery document it belongs to. For a device the hub knows,
+   * the device is announced again, so the registry and every app hear the
+   * change as an ordinary upsert. A device repeating what it already said
+   * changes nothing and is not announced again, and a payload the hub can't
+   * read is passed over: it never rejects or removes the device.
+   */
+  private programAnnounced(deviceId: string, payload: string): void {
+    const said = readProgram(payload);
+    if (said === null) {
+      this.options.log.warn(
+        { deviceId },
+        'Ignored a program announcement that is not a JSON object, or whose host is not a string',
+      );
+      return;
+    }
+    const config = this.known.get(deviceId);
+    if (said === 'withdrawn') {
+      if (!this.programs.delete(deviceId)) return;
+    } else {
+      const had = this.programs.get(deviceId);
+      if (had && sameProgram(had, said)) return;
+      if (!had && !config && this.pendingProgramCount() >= MAX_PENDING_PROGRAMS) return;
+      this.programs.set(deviceId, said);
+    }
+    if (config) this.announce(deviceId, config);
+  }
+
+  private pendingProgramCount(): number {
+    let count = 0;
+    for (const deviceId of this.programs.keys()) if (!this.known.has(deviceId)) count += 1;
+    return count;
+  }
+
+  /**
    * The device as the registry should hold it: what its discovery document
-   * declares, plus `camera` on every endpoint that has announced streams.
+   * declares, plus `camera` on every endpoint that has announced streams, and
+   * `program` when it said it is one.
    */
   private announce(deviceId: string, config: MqttDiscoveryConfig): void {
     const cameras = this.cameras.get(deviceId);
+    const program = this.programs.get(deviceId);
     const descriptor: AdapterDeviceDescriptor = {
       adapter: 'mqtt',
       externalId: deviceId,
       ...(config.vendor ? { vendor: config.vendor } : {}),
       ...(config.model ? { model: config.model } : {}),
       suggestedName: config.name,
+      ...(program ? { program } : {}),
       endpoints: config.endpoints.map((endpoint) => {
         const capabilities: CapabilityKind[] = [...endpoint.capabilities];
         if (cameras?.has(endpoint.endpointId)) capabilities.push('camera');

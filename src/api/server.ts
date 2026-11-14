@@ -154,6 +154,7 @@ import {
   KEY_RATE_CLOSE_CODE,
   MemberSessions,
   UNAUTHORIZED_CLOSE_CODE,
+  type MemberSession,
 } from './ws.js';
 import { PanelError, PanelService } from '../panels/store.js';
 import { CameraError, CameraProxy, cameraStatus } from '../cameras/proxy.js';
@@ -782,6 +783,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * instance, and a registry outliving it would be a registry of dead ones.
    */
   const sessions = new MemberSessions();
+  /**
+   * Who is watching a camera live, filed the same way and for the same
+   * reason: an MJPEG stream authorizes once, when it opens, and then relays
+   * frames for as long as the app holds it. Kept apart from `sessions`
+   * because a key's sockets are counted against `MAX_SOCKETS_PER_KEY` and its
+   * cameras against the proxy's own limit, and neither should spend the
+   * other's.
+   */
+  const cameraViewers = new MemberSessions();
 
   /**
    * Why an explicitly requested **recognition** run must not start, or `null`
@@ -937,7 +947,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     portraits: deps.portraits.describe(),
     // Additive, presence the capability: a hub carrying this block shows
     // cameras through itself (`/cameras/…`), and these are the stream kinds it
-    // relays and how many cameras it streams at once.
+    // relays and how many cameras it streams at once. `maxStreamsPerKey`
+    // arrived later and says how many of those one API key may open itself;
+    // a hub without it lets no key watch a camera at all.
     cameras: cameras.describe(),
     // Additive, presence the capability: a hub carrying this block keeps
     // panels on devices' pages (`/devices/:id/panels/…`), within these bounds.
@@ -2296,9 +2308,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * A still from a camera, through the hub.
    *
    * `camera.view` — Owner and Member by default, not Guest — because a camera
-   * shows people. The app names the stream by device, endpoint and stream id
-   * and never learns where the camera is; the hub fetches it from the address
-   * the camera announced, after the checks in `cameras/`.
+   * shows people; a key holds it only when it was given it on purpose
+   * (`KEY_GRANTABLE` says why). The app names the stream by device, endpoint
+   * and stream id and never learns where the camera is; the hub fetches it
+   * from the address the camera announced, after the checks in `cameras/`.
    */
   app.get(
     '/api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot',
@@ -2319,6 +2332,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * A camera live, as MJPEG, through the hub — shared with anybody already
    * watching it, since the camera serves one client.
+   *
+   * A key is named to the proxy, which lets it open one stream at a time and
+   * never the last free one; a still is a fresh request each time and already
+   * paced by the key's rate limit, so the route above names nobody.
    */
   app.get(
     '/api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg',
@@ -2326,9 +2343,46 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     async (request, reply) => {
       const target = cameraTarget(request.params, 'mjpeg');
       if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      // Filed like a socket, so revoking the key or removing the member hangs
+      // it up at once — and turned away if either happened while this request
+      // was being authenticated (`LATE_ADMISSION_MS`).
+      const memberId = request.member!.id;
+      let key = request.apiKey;
+      let hangUp: (() => void) | null = null;
+      let revoked = false;
+      const viewer: MemberSession = {
+        revoke: () => {
+          revoked = true;
+          hangUp?.();
+        },
+        rekey: (next) => {
+          key = next;
+        },
+      };
+      const admitted = cameraViewers.admit(memberId, viewer, key);
+      if (!admitted) return reply.code(401).send({ error: 'unauthorized' });
+      key = admitted.key;
+      const keyId = key?.id;
+      reply.raw.on('close', () => cameraViewers.forget(memberId, viewer, keyId));
+      // Asked before every frame, as the socket asks before every frame: a
+      // key that has expired, been paused or lost `camera.view`, or a role
+      // that has, sees nothing more.
+      const allowed = () =>
+        !revoked &&
+        (key === null || apiKeyState(key, deps.access) === 'active') &&
+        deps.access.canAs(memberId, 'camera.view', key);
+      const opener = key ? { keyId: key.id } : undefined;
       try {
         reply.hijack();
-        await cameras.watch(target, reply.raw, (listener) => request.raw.on('close', listener));
+        hangUp = await cameras.watch(
+          target,
+          reply.raw,
+          (listener) => request.raw.on('close', listener),
+          opener,
+          allowed,
+        );
+        // Revoked while the board was proving itself.
+        if (revoked) hangUp();
       } catch (error) {
         const code = error instanceof CameraError ? error.code : 'camera_unreachable';
         const status = error instanceof CameraError ? cameraStatus(error.code) : 502;
@@ -3099,6 +3153,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   ) {
     const closed = sessions.revoke(memberId);
     if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
+    const watching = cameraViewers.revoke(memberId);
+    if (watching > 0) deps.log.info({ memberId, watching }, 'Closed camera streams for a former member');
     // Their pins went with the member row (`device_favorites.member_id`
     // cascades); this is the in-memory half of the same delete. `access` holds
     // the same kind of map, keyed the same way, and would otherwise answer for
@@ -3487,6 +3543,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Its open streams render with the new grant from the next frame, and
     // the `access` frame every socket re-sends is how they hear it now.
     sessions.rekey(updated);
+    cameraViewers.rekey(updated);
     deps.events.emit('accessChanged');
 
     const accessMoved =
@@ -3541,6 +3598,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const owner = mine ? me.name : ((await deps.pairing.member(key.memberId))?.name ?? null);
     const closed = sessions.revokeKey(id);
     if (closed > 0) deps.log.info({ apiKeyId: id, closed }, 'Closed event streams for a revoked API key');
+    const watching = cameraViewers.revokeKey(id);
+    if (watching > 0) deps.log.info({ apiKeyId: id, watching }, 'Closed camera streams for a revoked API key');
     await apiKeys.remove(id);
     const who = actor(request);
     await deps.activity.record({

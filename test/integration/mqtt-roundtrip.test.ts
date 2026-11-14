@@ -16,6 +16,7 @@ import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
 import { AiRunLog } from '../../src/core/ai-runs.js';
 import { MappingLibrary } from '../../src/ai/library.js';
+import type { AdapterBus, AdapterDeviceDescriptor } from '../../src/adapters/adapter.js';
 import type { HubCommand } from '../../src/schema/index.js';
 import {
   startedAutomations,
@@ -347,6 +348,66 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     expect(body).not.toContain('http://');
   });
 
+  it('shows a device that says it is a program on the wire, and learns it again from the broker', async () => {
+    // The camera from the test before says it is a program, with a key this
+    // hub has never heard of beside the one it reads.
+    await fake.publishAsync(
+      'gethome/device/porch-cam/program',
+      JSON.stringify({ host: 'nuc.local', runtime: 'python' }),
+      { retain: true },
+    );
+    const porch = () => registry.listDevices().find((device) => device.externalId === 'porch-cam');
+    await waitFor(() => porch()?.program?.host === 'nuc.local', 8000, 'the porch camera saying it is a program');
+    const wire = async () =>
+      (
+        (await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth() })).json() as Array<
+          Record<string, unknown>
+        >
+      ).map((device) => ({ name: device.name, program: 'program' in device ? device.program : 'absent' }));
+    const list = await wire();
+    expect(list.find((device) => device.name === 'Porch camera')?.program).toEqual({ host: 'nuc.local' });
+    // And nothing else in the home carries the key: not the board beside it on
+    // the same broker, and not one Zigbee device.
+    const others = list.filter((device) => device.name !== 'Porch camera');
+    expect(others.length).toBeGreaterThanOrEqual(fleet.length + 1);
+    expect(others.filter((device) => device.program !== 'absent')).toEqual([]);
+    expect(list.find((device) => device.name === 'Pool pump')?.program).toBe('absent');
+
+    // A hub starting now is handed the retained document and the retained
+    // program topic in the broker's own order, and ends at the same answer.
+    const heard: AdapterDeviceDescriptor[] = [];
+    const bus: AdapterBus = {
+      deviceUpserted: (descriptor) => heard.push(descriptor),
+      deviceRemoved: () => {},
+      stateChanged: () => {},
+      reachabilityChanged: () => {},
+      radioReachabilityChanged: () => {},
+      commandFailed: () => {},
+      activity: () => {},
+    };
+    const fresh = new MqttAdapter({ mqttUrl: MQTT_URL, log });
+    await fresh.start(bus);
+    try {
+      await waitFor(
+        () => heard.filter((descriptor) => descriptor.externalId === 'porch-cam').at(-1)?.program?.host === 'nuc.local',
+        8000,
+        'a freshly started adapter learning the program from the broker',
+      );
+      expect(heard.filter((descriptor) => descriptor.externalId === 'pool-pump').every((descriptor) => !('program' in descriptor))).toBe(true);
+    } finally {
+      await fresh.stop();
+    }
+
+    // Taken back with an empty retained payload: hardware again.
+    await fake.publishAsync('gethome/device/porch-cam/program', '', { retain: true });
+    await waitFor(() => porch()?.program === null, 8000, 'the porch camera taking it back');
+    expect((await wire()).find((device) => device.name === 'Porch camera')?.program).toBe('absent');
+
+    // Said again, so the deletion below has a retained program topic to clear.
+    await fake.publishAsync('gethome/device/porch-cam/program', JSON.stringify({ host: 'nuc.local' }), { retain: true });
+    await waitFor(() => porch()?.program?.host === 'nuc.local', 8000, 'the porch camera saying it again');
+  });
+
   it('deletes an MQTT device for good: its retained topics are cleared and it stays gone', async () => {
     const porch = registry.listDevices().find((device) => device.externalId === 'porch-cam');
     expect(porch, 'the camera from the test before').toBeDefined();
@@ -364,7 +425,11 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     probe.on('message', (topic, payload) => {
       if (payload.length > 0) retained.push(topic);
     });
-    await probe.subscribeAsync(['gethome/discovery/porch-cam/config', 'gethome/device/porch-cam/camera']);
+    await probe.subscribeAsync([
+      'gethome/discovery/porch-cam/config',
+      'gethome/device/porch-cam/camera',
+      'gethome/device/porch-cam/program',
+    ]);
     await new Promise((resolve) => setTimeout(resolve, 400));
     await probe.endAsync();
     expect(retained).toEqual([]);

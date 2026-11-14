@@ -36,6 +36,11 @@ mirrors the Matter data model. The hub's `docs/device-schema.md` is canonical.
 - `offlineExpected` (present only when somebody said a device being offline is
   fine) and `offlineElsewhere` (it is on a Wi-Fi network the hub has left) mean
   an offline device is **not** a fault. Don't alarm about either.
+- `program` is present only on a device that said it is a program — a script,
+  a bridge or a service running on a computer, rather than a board. It may
+  carry `host`, the name of that computer, for people to read and never an
+  address to connect to. Every other device has no such key, and the object
+  may gain others: read past what you don't know.
 - `favorite` is the key's member's own pin, not the home's.
 - Absent sub-objects in `state` mean that capability has not reported yet —
   not zero. `sensors` is always present, possibly empty.
@@ -81,7 +86,14 @@ open: show an unknown kind generically.
 `camera` is a capability the hub adds itself, to a device that announces
 pictures over MQTT: its state carries `camera.streams[]` — ids, kinds and sizes,
 never an address — and the pictures come through the hub's own camera routes,
-which need `camera.view`, a permission no key may be given.
+`GET /api/v1/cameras/{deviceId}/{endpointId}/{streamId}/snapshot` for a stream
+whose `kind` is `snapshot` and `…/mjpeg` for one whose `kind` is `mjpeg`. They
+need `camera.view`, which a key holds only when the person gave it on purpose
+(see [rest-api.md](rest-api.md) for what it allows and the limits on streams).
+A stream that isn't announced, or is the other kind, is `404 camera_not_found`;
+a camera the hub could not or would not reach is a `502` naming why. Always go
+through the hub rather than to a camera's own address: the hub checks the
+board is the device it says it is, and the address is not in the state.
 
 Conversions to keep at hand:
 
