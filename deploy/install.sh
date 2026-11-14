@@ -1022,6 +1022,9 @@ MQTT_APP_USER="gethome"
 MQTT_ENV="$CONF_DIR/mqtt.env"
 MQTT_PASSWD_FILE="/etc/mosquitto/gethome.passwd"
 MQTT_ACL_FILE="/etc/mosquitto/gethome.acl"
+# The account the broker reads both files as: Debian's package creates it, and
+# runs the broker as it — see "These two files are the broker's" below.
+MQTT_BROKER_USER="mosquitto"
 # Set once the broker really is asking for a password, which is what decides
 # whether the units get credentials and what the closing summary says.
 MQTT_SECURED=""
@@ -1059,37 +1062,20 @@ MQTT_WAS_OPEN=""
 
 $SUDO mkdir -p /etc/mosquitto/conf.d
 
-# ── Never lock the hub out of its own broker ───────────────────────────────
-# `mosquitto_passwd` ships with the broker, so this should always be present.
-# If it somehow isn't, writing `allow_anonymous false` beside a password file
-# that does not exist would take Zigbee and every MQTT device down for good, on
-# a hub that installed perfectly — the installed-but-unusable trap. Stay open,
-# and say so loudly enough that it gets fixed.
-if command -v mosquitto_passwd >/dev/null 2>&1; then
-  if $SUDO mosquitto_passwd -c -b "$MQTT_PASSWD_FILE" "$MQTT_HUB_USER" "$MQTT_HUB_PASS" >/dev/null 2>&1 \
-    && $SUDO mosquitto_passwd -b "$MQTT_PASSWD_FILE" "$MQTT_APP_USER" "$MQTT_APP_PASS" >/dev/null 2>&1; then
-    MQTT_SECURED=1
-  else
-    warn "Could not write the MQTT password file, so the broker is staying open to the local network."
-  fi
-else
-  warn "mosquitto_passwd is missing, so the MQTT broker is staying open to the local network."
-fi
-
-if [[ -n "$MQTT_SECURED" ]]; then
-  # ── What each account may touch ──────────────────────────────────────────
-  # Only `read`, `write` and `readwrite` are used. mosquitto also understands
-  # `deny`, which would express "everything under zigbee2mqtt/ except
-  # bridge/info" in one line — and a config option an older broker does not
-  # parse is a fatal error, which here means a hub with no Zigbee and no MQTT
-  # at all. Listing what is allowed cannot fail that way.
-  #
-  # `zigbee2mqtt/+` is one level, so it is every device's state topic and none
-  # of `bridge/#`. The three bridge topics that are named are the ones a DIY
-  # integration actually wants; `bridge/info` is deliberately not among them,
-  # because it carries Zigbee2MQTT's own configuration and we are not going to
-  # depend on upstream redacting the network key from it.
-  $SUDO tee "$MQTT_ACL_FILE" >/dev/null <<MOSQACL
+# ── What each account may touch ──────────────────────────────────────────────
+# Only `read`, `write` and `readwrite` are used. mosquitto also understands
+# `deny`, which would express "everything under zigbee2mqtt/ except
+# bridge/info" in one line — and a config option an older broker does not
+# parse is a fatal error, which here means a hub with no Zigbee and no MQTT at
+# all. Listing what is allowed cannot fail that way.
+#
+# `zigbee2mqtt/+` is one level, so it is every device's state topic and none of
+# `bridge/#`. The three bridge topics that are named are the ones a DIY
+# integration actually wants; `bridge/info` is deliberately not among them,
+# because it carries Zigbee2MQTT's own configuration and we are not going to
+# depend on upstream redacting the network key from it.
+mqtt_acl() {
+  cat <<MOSQACL
 # GetHome Hub — written by deploy/install.sh. Do not edit; it is rewritten on
 # every install and update.
 #
@@ -1110,29 +1096,141 @@ topic read zigbee2mqtt/+
 topic read zigbee2mqtt/bridge/state
 topic read zigbee2mqtt/bridge/event
 topic read zigbee2mqtt/bridge/devices
-MOSQACL
 
-  # ── These two files are read by the broker, not by root ──────────────────
-  # mosquitto opens password_file and acl_file *after* it has dropped
-  # privileges to its own account, so a 0600 root-owned password file is one
-  # it cannot read — and the broker then refuses to start outright:
-  #
-  #   Error: Unable to open pwfile "/etc/mosquitto/gethome.passwd".
-  #
-  # which is port 1883 closed, Zigbee dead and every MQTT device gone, on a hub
-  # that installed perfectly. Reproduced against mosquitto 2.0.18.
-  #
-  # So this is not a tidy-up that may fail quietly: if the files cannot be made
-  # readable by the broker and unreadable by everyone else, we do not turn
-  # authentication on at all. An open broker is a hole; a broker that will not
-  # start is a hub with no radios, and this script must never choose the second
-  # while trying to fix the first.
-  if ! { getent group mosquitto >/dev/null 2>&1 \
-    && $SUDO chown root:mosquitto "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null \
-    && $SUDO chmod 0640 "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null; }; then
-    MQTT_SECURED=""
+# A device that holds an account of its own (docs/mqtt-integrations.md). Such
+# an account is named for the device, and mosquitto puts the name a client
+# signed in with where %u stands — so these two lines give every device its
+# own topics and nothing else, with no line to write per device. They add
+# nothing for the two accounts above, which reach these topics already.
+pattern readwrite gethome/device/%u/#
+pattern readwrite gethome/discovery/%u/#
+
+# Everything below the next line is written by gethome-mqtt-accounts.sh from
+# the hub's list of device accounts: for each device that is part of a
+# project, that project's own topics. It must stay the last line here.
+# gethome:device-accounts
+MOSQACL
+}
+
+# ── These two files are the broker's ─────────────────────────────────────────
+# mosquitto opens password_file and acl_file as its own account — after
+# dropping privileges where Debian's unit starts it as root (2.0), from the
+# start where the unit says `User=mosquitto` (Debian's 2.1.2) — and on every
+# reload as well. So a 0600 root-owned password file is one it cannot read, and
+# the broker then refuses to start outright:
+#
+#   Error: Unable to open pwfile "/etc/mosquitto/gethome.passwd".
+#
+# which is port 1883 closed, Zigbee dead and every MQTT device gone, on a hub
+# that installed perfectly.
+#
+# Readable is not enough either. From 2.0.16 on, mosquitto checks the owner and
+# group of both files against the account reading them, and says, at every
+# start and every reload:
+#
+#   Warning: File /etc/mosquitto/gethome.passwd owner is not mosquitto. Future
+#   versions will refuse to load this file.
+#
+# for the `root:mosquitto` 0640 this used to write. No released broker refuses
+# yet — the refusal is still compiled out in 2.1.2 — but one that does would be
+# the same broker that will not start, arriving in an `apt upgrade`. So both
+# files are the broker account's own: its user, its primary group (the gid it
+# reads as), and no access for anyone else. Measured silent, at start and on
+# SIGHUP, against the packaged 2.0.11, 2.0.18, 2.0.21, 2.0.22 and 2.1.2,
+# whichever way the unit starts it; 2.0.11 does not check at all.
+#
+# ── Written somewhere else first, and renamed into place ─────────────────────
+# Both files are built in a directory of root's beside them, handed to the
+# broker's account there, and only then renamed over the old ones — so the
+# broker never finds one half-written or one it cannot read, nobody else ever
+# finds one they can (2.0.11's `mosquitto_passwd -c` creates 0644), and the old
+# file's owner is never what the new one inherits: an upgraded hub's
+# root-owned pair is replaced, not edited. It also has to be a name that does
+# not exist yet: from 2.1, `mosquitto_passwd -c` opens with O_EXCL and refuses
+# a file that is already there ("File exists"), which on the final name would be
+# every update after the first falling back to an open broker. The directory
+# has a fixed name, so one an interrupted run left behind is cleared by the
+# next.
+#
+# Returns 1 when the password file could not be written, 2 when the files could
+# not be made the broker's, 3 when they could not be put in place. However it
+# fails, neither final file is left behind, so nothing below can point the
+# broker at a file that is not right.
+write_broker_files() {
+  local group stage="${MQTT_PASSWD_FILE%/*}/.gethome-staging" code=0
+  group="$(id -gn "$MQTT_BROKER_USER" 2>/dev/null)" || group=""
+  $SUDO rm -rf "$stage" 2>/dev/null || true
+  if ! $SUDO mkdir -m 0700 "$stage" 2>/dev/null; then
+    code=1
+  elif ! { $SUDO mosquitto_passwd -c -b "$stage/passwd" "$MQTT_HUB_USER" "$MQTT_HUB_PASS" >/dev/null 2>&1 \
+    && $SUDO mosquitto_passwd -b "$stage/passwd" "$MQTT_APP_USER" "$MQTT_APP_PASS" >/dev/null 2>&1 \
+    && mqtt_acl | $SUDO tee "$stage/acl" >/dev/null; }; then
+    code=1
+  elif [[ -z "$group" ]] || ! { $SUDO chown "$MQTT_BROKER_USER:$group" "$stage/passwd" "$stage/acl" 2>/dev/null \
+    && $SUDO chmod 0600 "$stage/passwd" "$stage/acl" 2>/dev/null; }; then
+    code=2
+  elif ! { $SUDO mv -f "$stage/acl" "$MQTT_ACL_FILE" 2>/dev/null \
+    && $SUDO mv -f "$stage/passwd" "$MQTT_PASSWD_FILE" 2>/dev/null; }; then
+    code=3
+  fi
+  $SUDO rm -rf "$stage" 2>/dev/null || true
+  if [[ "$code" != 0 ]]; then
     $SUDO rm -f "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null || true
-    warn "The MQTT broker's own account can't read the password file this machine would need, so the broker is staying open to the local network."
+  fi
+  return "$code"
+}
+
+# ── Never lock the hub out of its own broker ───────────────────────────────
+# `mosquitto_passwd` ships with the broker, so this should always be present.
+# If it somehow isn't, writing `allow_anonymous false` beside a password file
+# that does not exist would take Zigbee and every MQTT device down for good, on
+# a hub that installed perfectly — the installed-but-unusable trap. Stay open,
+# and say so loudly enough that it gets fixed. The same for every way
+# write_broker_files can fail: an open broker is a hole, but a broker that will
+# not start is a hub with no radios, and this script must never choose the
+# second while trying to fix the first.
+if command -v mosquitto_passwd >/dev/null 2>&1; then
+  if write_broker_files; then
+    MQTT_SECURED=1
+  else
+    case $? in
+      2) warn "The MQTT broker's own account can't be given the password file this machine would need, so the broker is staying open to the local network." ;;
+      *) warn "Could not write the MQTT password file, so the broker is staying open to the local network." ;;
+    esac
+  fi
+else
+  warn "mosquitto_passwd is missing, so the MQTT broker is staying open to the local network."
+fi
+
+# ── A device that holds its own account keeps it across this run ───────────
+# write_broker_files above began the password file again with the broker's own
+# two accounts, and the ACL is written whole — so every account the hub has
+# given a device (src/core/mqtt-device-accounts.ts) has just gone from both.
+# deploy/mqtt-accounts.sh puts them back from the hub's own list, here, before
+# the broker is restarted below and reads either file: a board must never find
+# its password refused because its hub was updated.
+#
+# The hub's note of what was last applied goes first. If the script then cannot
+# run — a first install has no list yet, and that is fine — nothing is left
+# claiming the list is in force, and the hub asks for it again when it starts.
+#
+# **Whether this machine gives devices their own accounts at all** is decided
+# here too, by what the broker's own tool just wrote. The hub writes a device's
+# line itself, as the PBKDF2-SHA512 hash mosquitto 2 stores (`$7$…`), so it
+# never has to hand a password to root. A broker whose tool writes anything
+# else — mosquitto 1's plain SHA-512, or whatever a later one moves to — is one
+# the hub does not know how to write a line for, and there devices are not
+# offered an account of their own: they share `gethome`, as they always did.
+MQTT_DEVICE_ACCOUNTS=""
+if [[ -n "$MQTT_SECURED" ]]; then
+  as_service_user rm -f "${DATA_DIR}/mqtt-accounts/result" 2>/dev/null || true
+  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" \
+    GETHOME_MQTT_USER="$MQTT_BROKER_USER" \
+    bash "$HUB_DIR/deploy/mqtt-accounts.sh" --no-reload --quiet >/dev/null 2>&1 || true
+  if $SUDO awk -F: -v user="$MQTT_HUB_USER" \
+    '$1 == user && substr($2, 1, 3) == "$7$" { found = 1 } END { exit found ? 0 : 1 }' \
+    "$MQTT_PASSWD_FILE" 2>/dev/null; then
+    MQTT_DEVICE_ACCOUNTS=1
   fi
 fi
 
@@ -2849,6 +2947,76 @@ DISPATCH
 WIFI_NETWORKS_UNITS=""
 manage_wifi_networks
 
+# ── A broker account for each device, given from an app ────────────────────
+# So a board somebody sets up signs in to the broker as itself, reaches only
+# its own topics, and stops working when it is deleted. Same shape again: the
+# hub writes its list of accounts into its own data directory, the path unit
+# notices, and the root script rebuilds mosquitto's password file and ACL from
+# it. deploy/mqtt-accounts.sh says what it refuses and why.
+#
+# `enabled` is the capability, written in the same breath as the units for the
+# reason `update/enabled` is, and only where the broker asks for a password and
+# stores one the way the hub writes a device's (MQTT_DEVICE_ACCOUNTS, decided
+# beside the password file above). Without it the hub offers no device an
+# account and every board shares `gethome`, which is what a hub from before
+# this does.
+manage_mqtt_device_accounts() {
+  local helper="${GETHOME_MQTT_ACCOUNTS_BIN:-/usr/local/lib/gethome-mqtt-accounts.sh}"
+  local accounts_dir="${DATA_DIR}/mqtt-accounts"
+
+  # Everything inside the directory as the hub's account (`as_service_user`).
+  as_service_user mkdir -p "$accounts_dir" 2>/dev/null || true
+  as_service_user rm -f "$accounts_dir/enabled" 2>/dev/null || true
+  [[ -n "$MQTT_DEVICE_ACCOUNTS" ]] || return 0
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/mqtt-accounts.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the broker-account helper, so every device set up on this hub will share one MQTT account."
+    return 0
+  fi
+
+  $SUDO tee /etc/systemd/system/gethome-mqtt-accounts.path >/dev/null <<UNIT
+[Unit]
+Description=Notice that the GetHome Hub's list of device accounts on the MQTT broker changed
+
+[Path]
+PathModified=${accounts_dir}/request
+Unit=gethome-mqtt-accounts.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # Started by the path unit and nothing else: no [Install], never enabled.
+  # No start limit, because each run is one small rewrite and a refusal to
+  # start is a device that keeps an account it should have lost — systemd's
+  # default of five starts in ten seconds is a handful of boards set up in a
+  # row, and passing it parks the path unit too until somebody resets it.
+  $SUDO tee /etc/systemd/system/gethome-mqtt-accounts.service >/dev/null <<UNIT
+[Unit]
+Description=Give the GetHome Hub's devices their own accounts on the MQTT broker
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
+Environment=GETHOME_MQTT_USER=${MQTT_BROKER_USER}
+ExecStart=${helper} --quiet
+TimeoutStartSec=60
+UNIT
+
+  # A hub that tried an earlier build may hold files root made here; `chown -R`
+  # hands them back without following anything (see `as_service_user`).
+  $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$accounts_dir" 2>/dev/null || true
+  as_service_user chmod 0750 "$accounts_dir" 2>/dev/null || true
+  as_service_user touch "$accounts_dir/enabled" 2>/dev/null || true
+  MQTT_ACCOUNTS_UNITS=1
+}
+MQTT_ACCOUNTS_UNITS=""
+manage_mqtt_device_accounts
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
@@ -2856,6 +3024,9 @@ $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
 if [[ -n "$WIFI_NETWORKS_UNITS" ]]; then
   $SUDO systemctl enable --now gethome-wifi.path >/dev/null 2>&1 || true
+fi
+if [[ -n "$MQTT_ACCOUNTS_UNITS" ]]; then
+  $SUDO systemctl enable --now gethome-mqtt-accounts.path >/dev/null 2>&1 || true
 fi
 # Zigbee2MQTT, when it is already running, is holding a broker connection that
 # was opened before any of this and may have been anonymous. Its unit has just

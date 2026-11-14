@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CAPABILITY_KINDS, DEVICE_KINDS, type CapabilityKind } from '../schema/index.js';
+import { DECLARABLE_CAPABILITY_KINDS, DEVICE_KINDS, type CapabilityKind } from '../schema/index.js';
 import {
   AUTOMATION_MODES,
   MAX_ACTIONS,
@@ -323,7 +323,7 @@ export function automationCatalog(): AutomationCatalog {
       capability: commandCapability(type),
       ...(notes.note !== undefined ? { note: notes.note } : {}),
     })),
-    capabilities: CAPABILITY_KINDS,
+    capabilities: DECLARABLE_CAPABILITY_KINDS,
     deviceKinds: DEVICE_KINDS,
   };
   return cached;

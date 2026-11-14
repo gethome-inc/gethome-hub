@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CAPABILITY_KINDS,
+  DECLARABLE_CAPABILITY_KINDS,
   DEVICE_KINDS,
   DEVICE_TYPE_CATALOG,
   commandSchema,
@@ -21,17 +22,43 @@ import {
   presentCapabilities,
   saturationFromPercent,
   z2mPositionFromPercent100ths,
+  type EndpointState,
 } from '../src/schema/index.js';
 
 describe('canonical vocabulary', () => {
-  it('has exactly the 27 capability kinds of the app schema, in order', () => {
+  it('has exactly the 28 capability kinds of the app schema, in order', () => {
     expect(CAPABILITY_KINDS).toEqual([
       'onOff', 'level', 'colorTemperature', 'color', 'thermostat', 'fan',
       'doorLock', 'windowCovering', 'temperature', 'humidity', 'occupancy',
       'contact', 'illuminance', 'pressure', 'flow', 'airQuality', 'pm25',
       'co2', 'smokeCOAlarm', 'battery', 'electricalPower', 'mode', 'rvcRun',
-      'mediaPlayback', 'event', 'irRemote', 'custom',
+      'mediaPlayback', 'event', 'irRemote', 'custom', 'camera',
     ]);
+  });
+
+  it('keeps the derived kinds out of what a device or a stored document may declare', () => {
+    // `camera` is added by the hub from the camera topic. A discovery document,
+    // a mapping or an automation naming it would be refused — the whole of it —
+    // by every build from before cameras, including the one an update rolls
+    // back to.
+    expect(DECLARABLE_CAPABILITY_KINDS).toEqual(CAPABILITY_KINDS.filter((kind) => kind !== 'camera'));
+    expect(DECLARABLE_CAPABILITY_KINDS).toHaveLength(27);
+  });
+
+  it('reads a camera from the state it has — and the state never carries an address', () => {
+    const state = endpointStateSchema.parse({
+      reachable: true,
+      sensors: {},
+      camera: { streams: [{ id: 'live', kind: 'mjpeg', label: 'Live', width: 640, height: 480 }] },
+    });
+    expect(presentCapabilities(state as EndpointState)).toContain('camera');
+    expect(() =>
+      endpointStateSchema.parse({
+        reachable: true,
+        sensors: {},
+        camera: { streams: [{ id: 'live', kind: 'mjpeg', url: 'http://192.168.1.20:81/stream' }] },
+      }),
+    ).toThrow();
   });
 
   it('has exactly the 16 device kinds of the app schema', () => {

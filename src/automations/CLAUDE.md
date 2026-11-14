@@ -144,6 +144,24 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   "the app derives one" from the name and the shape, unvalidated here for the
   reason a room's is: an allowlist would need a hub upgrade for every mark an
   app adds.
+  **Where a rule came from is two facts, and only one of them is live**
+  (`origin.ts`): every rule on the wire carries `origin`, who added it and how
+  it reached the hub. *Who* is `created_by`, a reference that follows a rename
+  and empties when the member leaves — no copy of a name is kept to outlive its
+  person. *How* is the `origin` column, written by `AutomationStore.create` and
+  by nothing else, so an edit, a rename and a revert leave it alone: a
+  template's rule edited in a chat is still a template's. Four rules. **The hub
+  records what it can see** — the route (`chat`, `template`, `document`) and
+  the API key when one sent it, never which app held a member's own sign-in;
+  a new way of creating a rule passes its own origin to `create`, and one that
+  forgets leaves a rule nobody can account for. **A key rides beside `kind`,
+  not as one**, because the template route takes a key too. **`sentence` is the
+  contract and `kind` is open**, on the wire and in the store alike: a build
+  rolled back past the one that wrote a word carries it through and says who.
+  And **`null` is an answer** — nothing to say — where absence is a hub older
+  than the field, so the wire always sends one or the other. It duplicates the
+  first version's note on purpose: that note is evicted by the eleventh edit,
+  and migration `0022` read back what was still there.
   **Where a rule happens is derived, never stored** (`scope.ts`): every rule on
   the wire carries `roomId`, the one room every device it touches sits in, or
   null for a rule about the whole house — which is what lets an app put a rule

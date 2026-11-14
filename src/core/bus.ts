@@ -16,7 +16,14 @@ import type { CommissionFailure } from '../adapters/matter/commission-failures.j
  */
 export interface HubEvents {
   deviceUpserted: [deviceId: string];
-  deviceRemoved: [deviceId: string];
+  /**
+   * A device left the home. The second argument says what it was on its own
+   * protocol — by the time this fires the row has gone, and a listener that
+   * holds something under the protocol's id rather than the hub's (a broker
+   * account, for one) has no other way to find it. Optional, so a listener
+   * that only wants the id reads it as it always did.
+   */
+  deviceRemoved: [deviceId: string, device?: { adapter: AdapterId; externalId: string }];
   stateChanged: [deviceId: string, endpointId: number, state: EndpointState];
   /**
    * Rooms or zones changed — the whole of both lists, not a diff.
@@ -39,6 +46,15 @@ export interface HubEvents {
    * happened to reconnect. Same argument as `structure`.
    */
   portraitsChanged: [deviceId: string];
+  /**
+   * A device's panels changed — one was installed, replaced or removed.
+   *
+   * Its own event rather than `deviceUpserted`, which is the registry's: the
+   * automations engine reloads on that one, and a panel on a device's page
+   * changes nothing a rule reads. The socket answers it with the same
+   * `deviceUpserted` frame, because the panels are part of the device's wire.
+   */
+  panelsChanged: [deviceId: string];
   /**
    * A room's pictures changed (`room-pictures/store.ts`) — one drawn, its
    * night landed, its markers moved, or one removed. Carries the room and

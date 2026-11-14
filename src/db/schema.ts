@@ -361,6 +361,42 @@ export const apiKeys = sqliteTable(
   (table) => [index('api_keys_member').on(table.memberId)],
 );
 
+/**
+ * A device's own account on the hub's MQTT broker (`core/mqtt-device-accounts.ts`).
+ *
+ * One row per device id on the MQTT convention — the id is the broker
+ * username, which is what lets one static ACL line confine every account to
+ * its own topics. **The password is not here**: the row keeps the broker's own
+ * hash of it, in the form mosquitto's password file holds, and that is the
+ * whole of what the hub writes down.
+ *
+ * A table of its own, and a new one, so the build before this never reads it:
+ * `install.sh` rolls back after the migration has run, and that build simply
+ * never asks. The accounts it leaves on the broker keep working until a newer
+ * build manages them again.
+ */
+export const mqttDeviceAccounts = sqliteTable('mqtt_device_accounts', {
+  /** The device's id on the MQTT convention, and its broker username. */
+  deviceId: text('device_id').primaryKey(),
+  /** `$7$<rounds>$<salt>$<hash>` — PBKDF2-SHA512, as mosquitto stores it. */
+  passwordHash: text('password_hash').notNull(),
+  /**
+   * The project this device is a part of, when whoever set it up said so: the
+   * one `gethome/project/<key>/…` branch its account may use. Null is a device
+   * with no project topics at all.
+   */
+  projectKey: text('project_key'),
+  /**
+   * Who asked for it. Set null when that member leaves — a board stays in the
+   * home after the person who joined it has gone — which is why the name is
+   * kept beside it: "who gave this board its account" has to outlive the row
+   * it points at.
+   */
+  memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+  memberName: text('member_name').notNull(),
+  createdAt: createdAt(),
+});
+
 export const invites = sqliteTable('invites', {
   id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */
@@ -784,6 +820,22 @@ export const automations = sqliteTable(
      * running it.
      */
     createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
+    /**
+     * How the rule reached the hub, written once when it is created and never
+     * again — `StoredOrigin` as JSON (`src/automations/origin.ts`): in a chat,
+     * from a template or as a document, and the API key when one sent it.
+     *
+     * Beside `created_by` rather than in it, because they go stale in opposite
+     * ways: the member is a live reference that follows a rename and empties
+     * when they leave, while *how* is a fact about one moment that nothing
+     * afterwards changes. It was recoverable only from the first version's
+     * note, which is the first thing ten versions evict.
+     *
+     * Null on a rule saved before the hub kept it, apart from what migration
+     * `0022` could still read out of those notes — so null means "this hub
+     * does not know", never "nothing in particular".
+     */
+    origin: text('origin', { mode: 'json' }),
     sortOrder: integer('sort_order').notNull().default(0),
     createdAt: createdAt(),
     updatedAt: createdAt('updated_at'),
@@ -933,6 +985,47 @@ export const automationChatMessages = sqliteTable(
     index('automation_chat_session').on(table.sessionId, table.at),
     index('automation_chat_surface').on(table.surface, table.at),
   ],
+);
+
+/**
+ * Panels — the cards a device's page shows in the apps, of every kind, uploaded
+ * through `PUT /devices/:id/panels/:panelId` (`src/panels/`).
+ *
+ * **One table for every kind**, keyed by the device and the panel's id, so a
+ * device never holds two panels with one id whatever kind each is; `kind` says
+ * how the apps draw it (`web` only, today). **The bytes are files, the record
+ * is a row**, `device_portraits`' rule: a `web` panel's files live under
+ * `<data>/panels/<device>/<panel>/` and this row carries the manifest that
+ * serving resolves paths against — a request is answered from the manifest,
+ * never by asking the filesystem what is there. One row per panel, so a
+ * re-upload replaces it; a device's panels go with the device (the row by
+ * cascade, the directory by the store).
+ */
+export const devicePanels = sqliteTable(
+  'device_panels',
+  {
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    panelId: text('panel_id').notNull(),
+    /** How the apps draw it — `web` today, an open word to every reader. */
+    kind: text('kind').notNull(),
+    title: text('title').notNull(),
+    /** Over every file's path and digest — an identical re-upload writes nothing. */
+    sha256: text('sha256').notNull(),
+    bytes: integer('bytes').notNull(),
+    /** The height the apps give it on the page, in points. */
+    height: integer('height').notNull(),
+    /** `[{path, bytes, sha256, type}]` — what the panel is made of. */
+    manifest: text('manifest', { mode: 'json' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    /** Who put it there, with their name for when the id points at somebody since removed. */
+    memberId: text('member_id'),
+    memberName: text('member_name'),
+  },
+  (table) => [primaryKey({ columns: [table.deviceId, table.panelId] })],
 );
 
 /**

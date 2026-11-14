@@ -49,13 +49,21 @@ studio, **Add device** on your own row in the People tab) — claimed with
 |---|---|
 | nothing | read everything you can read: devices and their state, rooms, rules, history |
 | `control: true` | also work the home: commands (**locks included**), pressing scenes, switching modes, pinning favorites |
-| `permissions: [...]` | also do those things, from the hub's `grantable` list: rename and move devices, add or remove them, change rooms, rename the home, read everybody's activity, write rules (`automation.manage`, which needs `control`), switch the radio, update the hub |
+| `permissions: [...]` | also do those things, from the hub's `grantable` list: rename and move devices, add or remove them, look through the cameras (`camera.view`), change rooms, rename the home, read everybody's activity, write rules (`automation.manage`, which needs `control`), switch the radio, update the hub |
 
 A key can never be given more than you have yourself, and never anything that
 mints a credential, changes who is in the home, reads a conversation, or touches
 the home's AI or broker keys. `expiresInDays` (1–3650) is optional; leave it out
 for a key that does not expire. **Start read-only**: a dashboard needs nothing
 more, and a key that can only read cannot be talked into anything.
+
+**`camera.view` is the one to think twice about.** A key holding it sees every
+camera in the home, at any hour, and the hub keeps no record of each look —
+give it only to software you trust with every camera in the house. Stills are
+the cheap way to watch: each is one request under the key's rate limit. A key
+may hold only one live stream open at a time, and never the hub's last free
+one, so a phone can always open the porch camera; joining a stream that is
+already open is always allowed ([api.md](api.md#cameras)).
 
 **The secret is shown once**, as `gethome_` and 43 letters and digits. The hub
 keeps only its hash — lose it and make another.
@@ -178,6 +186,12 @@ reads *Anna’s “Porch light script” · Porch light: power* rather than as i
 phone had done it at sunset. That is also how to find a script that is
 misbehaving — and the reason to give each integration a key of its own and a
 name that says what it is.
+
+A rule a key adds says so for as long as the rule exists, not only while the
+feed remembers: every rule carries
+[`origin`](api.md#where-a-rule-came-from), and one a key saved reads *Added by
+Anna’s “Porch light script”* to everybody in the home — by the key's name as it
+is now, and by the name it had once the key is revoked.
 
 ## MQTT or the API?
 

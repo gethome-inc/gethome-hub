@@ -42,6 +42,7 @@ import {
   keptPhotoUses,
   memberPhotoSettings,
   members,
+  mqttDeviceAccounts,
   roles,
   rooms,
   settings,
@@ -105,6 +106,9 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(keptPhotoUses);
   await db.delete(keptPhotos);
   await db.delete(memberPhotoSettings);
+  // A device's broker account outlives the member who gave it, so it is not
+  // taken by the delete below and would otherwise be the next test's.
+  await db.delete(mqttDeviceAccounts);
   await db.delete(members);
   // Built-in roles are seeded by the migration and are part of the schema a
   // hub boots with, so they stay. A role a test invented does not.

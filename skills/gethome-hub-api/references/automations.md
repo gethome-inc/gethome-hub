@@ -174,7 +174,7 @@ replaced ("Hall lamp didn’t answer", `kind: "refused"`) and the rule's
 a device acted. The exact terms are beside them, in
 `causeDetail` (may be `null`) and a step's `detail`.
 
-Each rule in `GET /api/v1/automations` also carries two things worth reading
+Each rule in `GET /api/v1/automations` also carries three things worth reading
 before asking for traces:
 
 - `status` — `today: {date, runs, problems, skipped}` for the home's own day,
@@ -184,8 +184,16 @@ before asking for traces:
   *skip* is the rule declining before it acts and is not a problem.
 - `devices` — `{reads: [deviceId…], controls: [deviceId…]}`: what the rule
   watches and what it sends commands to, as the home is right now.
+- `origin` — who added the rule and how it reached the hub, or `null` when the
+  hub cannot say. `sentence` is the whole answer in words ("Added by Anna in a
+  chat"); show it as it is. Beside it, when known: `kind` (`chat`, `template`,
+  `document`, and words a later hub may add), `memberName`, and — for a rule a
+  key sent — `via: "api"` with `apiKeyId` and `apiKeyName`. A rule you save
+  with `POST /api/v1/automations` reads `Added by <member>’s “<key name>”` to
+  everybody in the home, so name your key for what it is.
 
-An older hub sends neither field; treat absence as "not known", not as zero.
+An older hub sends none of these fields; treat absence as "not known", not as
+zero.
 
 ## Templates
 

@@ -152,6 +152,21 @@ and each can stall. A pairing can be cancelled, which stops the discovery
 rather than only closing the screen; the hub runs **one at a time**, which is
 what makes a single cancel unambiguous.
 
+## Taking a device out of the home
+
+`DELETE /devices/:id` takes the node off the hub's fabric (`removeNode`, with
+decommissioning tried first): an accessory that can be reached is told to
+remove the hub's fabric, so it forgets the hub too and can be paired again —
+here or elsewhere — straight away, and one that cannot be reached is removed
+from the hub regardless, keeping a fabric entry of its own that a factory reset
+clears. The request does not wait for any of it, and nothing the node does in
+the meantime brings it back: the adapter stops announcing it before the first
+`await`, and the registry holds it off the home until the adapter says it has
+gone — across a restart too, and on a one-radio board running Zigbee, where
+the Matter adapter is not running at all and is handed the node when it next
+starts ([`api.md`](api.md#taking-a-device-out-of-the-home-delete-devicesid)).
+Paired again, an accessory is a new node with a new id, and a new device.
+
 ## Knowing a device has gone
 
 Matter has no ping: a controller learns a node is gone when it stops feeding a
