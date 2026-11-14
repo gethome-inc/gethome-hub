@@ -53,6 +53,24 @@ the fetch in *What leaves the hub*. Update them in the same change.
   `maxUpstreams` (4) at once — `camera_busy`, the one refusal that is a `409`
   (`cameraStatus`); everything else the camera did is a `502`. Nothing is
   written to disk.
+- **`X-Content-Type-Options: nosniff` on the stream is load-bearing, and the
+  framing is not what makes a picture late.** `URLSession` parses
+  `multipart/x-mixed-replace` itself, and unless the response says `nosniff`
+  it sniffs every part's type first: a part **under 512 bytes** is kept until
+  bytes arrive after it, which on a live stream is the next frame. That reads
+  exactly like a framing fault — each picture shown when the next one is
+  written — and re-ordering what a frame's writes contain does nothing for it.
+  Measured on macOS 27 with a `URLSessionDataDelegate` on 2026-11-14 (iOS not
+  measured): through `CameraProxy` as it is, a picture written once a second
+  or ten times a second, 70 bytes or 20 kB, reached the delegate 1–8 ms after
+  the camera wrote it; the same bytes from a fake hub without the header
+  arrived a whole frame late at 70–511 bytes and on time from 512 up. So a
+  real camera's pictures are on time twice over, and the case that bites is a
+  **test fixture**: a fake hub with a tiny JPEG and no `nosniff` shows a lag
+  the hub does not have. Keep the header, keep each part written whole when
+  its frame is (head with `Content-Length`, picture, `\r\n`), and before
+  changing how a part is written read the stream with `URLSession` rather
+  than `curl` or a browser, which do not hold anything back.
 - **An API key may open one stream at a time, and never the last free one.**
   `camera.view` is key-grantable, and software holding a key tends to keep a
   stream for as long as it runs, while the four upstreams are shared with the

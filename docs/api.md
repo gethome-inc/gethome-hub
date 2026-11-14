@@ -3011,7 +3011,15 @@ app fetches through the hub, by the names the state gives it:
   `Cache-Control: no-store`;
 - `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` —
   `multipart/x-mixed-replace; boundary=gethomeframe`, one JPEG per part, for as
-  long as the request is held open.
+  long as the request is held open. Each part is written whole when its frame
+  arrives — the boundary line, `Content-Type: image/jpeg` and `Content-Length`,
+  the JPEG, a line end — so a picture can be shown as soon as its last byte is
+  read, by its length or by its own markers, without waiting for the next
+  boundary. The response carries `X-Content-Type-Options: nosniff`, and an
+  Apple client depends on it: without it `URLSession` sniffs each part's type
+  and holds a part under 512 bytes until the next frame's bytes arrive. A
+  stand-in for the hub in an app's tests has to send the header too, or it
+  shows a one-frame lag the hub does not have.
 
 Both need `camera.view`, for a member or for an [API key](#api-keys) given it.
 A stream that isn't announced, or is the other kind, is `404 camera_not_found`.
