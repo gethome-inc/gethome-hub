@@ -162,6 +162,13 @@
       "when": 1794574574217,
       "tag": "0022_automation_origin",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1794642753786,
+      "tag": "0023_mqtt_device_accounts",
+      "breakpoints": true
     }
   ]
 }

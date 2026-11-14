@@ -396,7 +396,7 @@ export class DeviceRegistry implements AdapterBus {
         if (entry.deviceId === cached.id) this.dirtyState.delete(key);
       }
       await this.db.delete(devices).where(eq(devices.id, cached.id));
-      this.events.emit('deviceRemoved', cached.id);
+      this.events.emit('deviceRemoved', cached.id, { adapter, externalId });
       await this.activityLog.record({
         kind: 'device.removed',
         message: by ? `${by.name} removed ${cached.name}.` : `${cached.name} was removed.`,

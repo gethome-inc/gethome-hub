@@ -440,6 +440,11 @@ describe.skipIf(!handle)('API keys', () => {
     'DELETE /api/v1/device-mappings/:exposesHash': 'permission hub.ai',
     'POST /api/v1/device-mappings/:exposesHash/repair': 'permission hub.ai',
     'GET /api/v1/settings/mqtt': 'permission hub.mqtt',
+    // A device's own broker account is a credential, and no key mints, lists
+    // or ends one — the `hub.mqtt` reasoning, and the `/api-keys` one.
+    'GET /api/v1/mqtt/device-accounts': 'deny',
+    'POST /api/v1/mqtt/device-accounts': 'deny',
+    'DELETE /api/v1/mqtt/device-accounts/:deviceId': 'deny',
     'PUT /api/v1/settings/radio': 'permission hub.radio',
     'GET /api/v1/system/update': 'read',
     'POST /api/v1/system/update': 'permission hub.update',

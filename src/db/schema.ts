@@ -361,6 +361,42 @@ export const apiKeys = sqliteTable(
   (table) => [index('api_keys_member').on(table.memberId)],
 );
 
+/**
+ * A device's own account on the hub's MQTT broker (`core/mqtt-device-accounts.ts`).
+ *
+ * One row per device id on the MQTT convention — the id is the broker
+ * username, which is what lets one static ACL line confine every account to
+ * its own topics. **The password is not here**: the row keeps the broker's own
+ * hash of it, in the form mosquitto's password file holds, and that is the
+ * whole of what the hub writes down.
+ *
+ * A table of its own, and a new one, so the build before this never reads it:
+ * `install.sh` rolls back after the migration has run, and that build simply
+ * never asks. The accounts it leaves on the broker keep working until a newer
+ * build manages them again.
+ */
+export const mqttDeviceAccounts = sqliteTable('mqtt_device_accounts', {
+  /** The device's id on the MQTT convention, and its broker username. */
+  deviceId: text('device_id').primaryKey(),
+  /** `$7$<rounds>$<salt>$<hash>` — PBKDF2-SHA512, as mosquitto stores it. */
+  passwordHash: text('password_hash').notNull(),
+  /**
+   * The project this device is a part of, when whoever set it up said so: the
+   * one `gethome/project/<key>/…` branch its account may use. Null is a device
+   * with no project topics at all.
+   */
+  projectKey: text('project_key'),
+  /**
+   * Who asked for it. Set null when that member leaves — a board stays in the
+   * home after the person who joined it has gone — which is why the name is
+   * kept beside it: "who gave this board its account" has to outlive the row
+   * it points at.
+   */
+  memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+  memberName: text('member_name').notNull(),
+  createdAt: createdAt(),
+});
+
 export const invites = sqliteTable('invites', {
   id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */

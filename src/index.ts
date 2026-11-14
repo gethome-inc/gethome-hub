@@ -25,6 +25,7 @@ import { readWifiCountry, readWifiCredentials } from './core/wifi.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
+import { MqttDeviceAccounts } from './core/mqtt-device-accounts.js';
 import { brokerCredentials } from './mqtt-auth.js';
 import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
@@ -364,6 +365,17 @@ async function main(): Promise<void> {
   });
   updateOutcomes.start();
 
+  // The devices that hold a broker account of their own. Built here rather
+  // than left to the server so the list can be settled against the broker once
+  // the API is up, and so its one timer is stopped with everything else.
+  const mqttDeviceAccounts = new MqttDeviceAccounts({
+    db,
+    dataDir: config.DATA_DIR,
+    events,
+    reserved: [config.MQTT_USERNAME, config.MQTT_INTEGRATION_USERNAME],
+    log: log.child({ module: 'mqtt-accounts' }),
+  });
+
   const app = await buildServer({
     db,
     log,
@@ -422,6 +434,7 @@ async function main(): Promise<void> {
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
+    mqttDeviceAccounts,
     ...(mqttObserver ? { mqttObserver } : {}),
   });
 
@@ -434,6 +447,11 @@ async function main(): Promise<void> {
   log.info(
     `API listening on ${config.BIND_ADDRESS}:${config.PORT} (hub ${secret.hubId}).`,
   );
+
+  // After the API is up, and not awaited: it writes one small file when the
+  // broker's accounts and the table have parted, and nothing about starting
+  // the hub waits on a broker. It never throws.
+  void mqttDeviceAccounts.reconcile();
 
   let mdns: MdnsAdvertiser | null = null;
   if (config.MDNS) {
@@ -541,6 +559,7 @@ async function main(): Promise<void> {
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
+    mqttDeviceAccounts.stop();
     radioPressure?.stop();
     updateOutcomes.stop();
     photos.stop();

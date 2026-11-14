@@ -532,7 +532,9 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
 
     expect(adapter.forgotten).toEqual(['lamp-1']);
     expect(registry.listDevices()).toHaveLength(0);
-    expect(removed).toHaveBeenCalledWith(deviceId);
+    // The event says what the device was on its own protocol too: the row has
+    // gone by now, and a broker account is filed under that id, not the hub's.
+    expect(removed).toHaveBeenCalledWith(deviceId, { adapter: 'mqtt', externalId: 'lamp-1' });
   });
 
   /**
