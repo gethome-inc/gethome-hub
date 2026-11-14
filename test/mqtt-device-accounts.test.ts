@@ -268,8 +268,10 @@ describe.skipIf(!handle)('the hub’s list, applied by the root script', () => {
     expect(await accounts.list()).toHaveLength(1);
     // It is still on its way: the next run of the script lands it.
     expect(passwdUsers(m)).toEqual(['gethome-hub', 'gethome']);
+    expect(await accounts.settled()).toBe(false);
     runAccountsScript(m);
     expect(passwdUsers(m)).toEqual(['gethome-hub', 'gethome', 'desk-light-x7k2q9']);
+    expect(await accounts.settled()).toBe(true);
   });
 
   it('keeps nothing when the root script refuses the list', async () => {

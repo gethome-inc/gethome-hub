@@ -309,6 +309,31 @@ export class MqttDeviceAccounts {
     return rows.map(record);
   }
 
+  /**
+   * Whether the broker has been told everything the table says: the list on
+   * disk is the table's, and the root half answered `applied` for exactly that
+   * list. False between a change and the reload that carries it — the moment
+   * after a `pending` mint, or inside `REVOKE_SETTLE_MS` — and for as long as
+   * the root half goes without answering.
+   *
+   * Read outside the queue on purpose: a caller polling this must not wait
+   * behind the very apply it is asking about.
+   */
+  async settled(): Promise<boolean> {
+    return this.isSettled(this.listBody(await this.rows()));
+  }
+
+  private isSettled(body: string): boolean {
+    const current = this.readList();
+    const result = readMqttAccountsResult(this.dataDir);
+    return (
+      current !== undefined &&
+      current.body === body &&
+      result?.state === 'applied' &&
+      result.id === current.revision
+    );
+  }
+
   async get(deviceId: string): Promise<MqttDeviceAccount | undefined> {
     const row = await this.db.query.mqttDeviceAccounts.findFirst({
       where: eq(mqttDeviceAccounts.deviceId, deviceId),
@@ -478,15 +503,7 @@ export class MqttDeviceAccounts {
     try {
       if (!this.availability().available) return;
       await this.serial(async () => {
-        const body = this.listBody(await this.rows());
-        const current = this.readList();
-        const result = readMqttAccountsResult(this.dataDir);
-        const settled =
-          current !== undefined &&
-          current.body === body &&
-          result?.state === 'applied' &&
-          result.id === current.revision;
-        if (settled) return;
+        if (this.isSettled(this.listBody(await this.rows()))) return;
         await this.apply(0);
       });
     } catch (error) {

@@ -4170,9 +4170,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * `device.add`, like making one: it is the list of what that permission
    * handed out. No key reads it, the `hub.mqtt` reasoning — what is on the
    * broker and under which name is the home's own plumbing.
+   *
+   * `pending` is whether the broker is still behind this list — true from a
+   * change until the machine has applied it, so a client that was answered
+   * `202 {state: "pending"}` can wait here for the account to work rather
+   * than hand a board a password the broker does not know yet. Only where
+   * accounts are available at all: nothing is ever applied elsewhere.
    */
   app.get('/api/v1/mqtt/device-accounts', memberOnlyNeeds('device.add'), async () => ({
     ...mqttDeviceAccountsCapability,
+    ...(mqttDeviceAccountsCapability.available
+      ? { pending: !(await mqttDeviceAccounts.settled()) }
+      : {}),
     accounts: (await mqttDeviceAccounts.list()).map(deviceAccountWire),
   }));
 

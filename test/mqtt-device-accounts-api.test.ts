@@ -31,6 +31,7 @@ import {
 import {
   brokerMachine,
   passwdUsers,
+  runAccountsScript,
   watchForAccountRequests,
   type BrokerMachine,
 } from './helpers/mqtt-accounts.js';
@@ -114,7 +115,7 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
   const list = async (token: string) =>
     (
       await app.inject({ method: 'GET', url: '/api/v1/mqtt/device-accounts', headers: auth(token) })
-    ).json() as { available: boolean; max: number; accounts: AccountWire[] };
+    ).json() as { available: boolean; max: number; pending?: boolean; accounts: AccountWire[] };
   interface AccountRow {
     kind: string;
     message: string;
@@ -431,7 +432,20 @@ describe.skipIf(!handle)('a broker account for each device, over the API', () =>
     expect(body.state).toBe('pending');
     expect(body.password).toMatch(/^[0-9a-f]{32}$/);
     expect((await list(ownerToken)).accounts).toHaveLength(1);
+
+    // And the list says the broker is still behind it, until the machine has
+    // applied it — which is what a client waits on before it hands the
+    // password to a board that would otherwise be refused.
+    expect((await list(ownerToken)).pending).toBe(true);
+    runAccountsScript(m);
+    expect((await list(ownerToken)).pending).toBe(false);
+    expect(passwdUsers(m)).toContain('desk-light-x7k2q9');
   }, 15_000);
+
+  it('says nothing is pending once an account has been applied', async () => {
+    expect((await mint(ownerToken, { deviceId: 'desk-light-x7k2q9' })).statusCode).toBe(201);
+    expect((await list(ownerToken)).pending).toBe(false);
+  });
 
   it('answers 502 and keeps nothing when the broker’s files cannot take it', async () => {
     writeFileSync(m.passwd, `gethome:${brokerPasswordHash('integration-secret')}\n`);
@@ -559,6 +573,15 @@ describe.skipIf(!handle)('a hub whose installer never set device accounts up', (
     expect(hub.mqtt).toEqual({
       deviceAccounts: { available: false, reason: 'not-installed', max: 250 },
     });
+  });
+
+  it('lists nothing and claims nothing about a broker it never writes to', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/mqtt/device-accounts',
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(response.json()).toEqual({ available: false, reason: 'not-installed', max: 250, accounts: [] });
   });
 
   it('refuses to make one rather than recording an account no broker will ever hold', async () => {
