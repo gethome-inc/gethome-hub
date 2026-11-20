@@ -19,17 +19,17 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.7.0",
+    "@anthropic-ai/sdk": "^1.9.0",
     "@fastify/websocket": "^11.3.7",
     "@homebridge/ciao": "^1.4.0",
     "@matter/main": "~0.17.9",
     "@project-chip/matter.js": "~0.17.9",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^13.2.0",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.8",
     "mqtt": "^5.16.1",
     "pino": "^10.4.0",
-    "ws": "^8.22.2",
+    "ws": "^8.23.0",
     "zod": "^4.6.7"
   },
   "optionalDependencies": {
