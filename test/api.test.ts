@@ -1092,7 +1092,7 @@ describe.skipIf(!handle)('hub API', () => {
       hasKey: true,
       providers: {
         anthropic: { hasKey: true, model: 'claude-opus-5-5' },
-        openai: { hasKey: true, model: 'gpt-6.1-sol' },
+        openai: { hasKey: true, model: 'gpt-6.2-sol' },
       },
       // Both keys, so which one recognises devices is now somebody's choice.
       mapping: { provider: 'anthropic', choosable: true },
@@ -1222,8 +1222,8 @@ describe.skipIf(!handle)('hub API', () => {
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
     expect(assistant.models.map((model) => model.id)).toEqual([
-      'gpt-6-astra',
-      'gpt-6.1-sol',
+      'gpt-6.2-astra',
+      'gpt-6.2-sol',
       'gpt-6.1-terra',
       'gpt-6-luna',
     ]);
@@ -1234,8 +1234,8 @@ describe.skipIf(!handle)('hub API', () => {
       'claude-haiku-5-5',
     ]);
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
-      'GPT-6 Astra',
-      'GPT-6.1 Sol',
+      'GPT-6.2 Astra',
+      'GPT-6.2 Sol',
       'GPT-6.1 Terra',
       'GPT-6 Luna',
     ]);
@@ -1247,14 +1247,14 @@ describe.skipIf(!handle)('hub API', () => {
       method: 'PATCH',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
-      payload: { openaiModel: 'gpt-6-astra', mappingProvider: 'openai' },
+      payload: { openaiModel: 'gpt-6.2-astra', mappingProvider: 'openai' },
     });
     expect(moved.json()).toMatchObject({
       provider: 'openai',
       mapping: { provider: 'openai', choosable: true },
-      providers: { openai: { model: 'gpt-6-astra' } },
+      providers: { openai: { model: 'gpt-6.2-astra' } },
       // The flat block is the raw column, and has never been what runs.
-      openai: { model: 'gpt-6-astra' },
+      openai: { model: 'gpt-6.2-astra' },
     });
 
     // A subscription token beside the OpenAI key: two stored keys, one usable.
@@ -1266,7 +1266,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(token.json()).toMatchObject({
       mapping: { choosable: true },
       assistant: { provider: 'openai', choosable: false },
-      automations: { provider: 'openai', model: 'gpt-6.1-sol', choosable: false },
+      automations: { provider: 'openai', model: 'gpt-6.2-sol', choosable: false },
     });
 
     // Leave the hub as the next test expects to find it: one Anthropic API

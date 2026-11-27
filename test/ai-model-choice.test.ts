@@ -163,20 +163,21 @@ describe.skipIf(!handle)('which model a run is given', () => {
 
   it('leaves the more thorough of OpenAI’s two alone as well', async () => {
     await settings.setAiKey('openai', 'sk-openai-key-0000');
-    await settings.setAiModel('gpt-6-astra', 'openai');
+    await settings.setAiModel('gpt-6.2-astra', 'openai');
     const mapper = new AiDeviceMapper(db, settings, log);
     await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
 
-    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6-astra']));
+    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.2-astra']));
   });
 
   /**
    * **What updating a hub does to a home that chose a model this build
-   * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, GPT-6
-   * Sol → GPT-6.1 Sol — and nobody has to do anything. GPT-5.6 Terra lands on
-   * GPT-6.1 Sol here as well, for a different reason: its successor is GPT-6.1
-   * Terra, which recognition does not offer, so the walk runs off the end of
-   * the chain and recognition's default is what runs.
+   * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, GPT-6.1
+   * Sol → GPT-6.2 Sol, GPT-6 Astra → GPT-6.2 Astra — and nobody has to do
+   * anything. GPT-5.6 Terra lands on GPT-6.2 Sol here as well, for a different
+   * reason: its successor is GPT-6.1 Terra, which recognition does not offer,
+   * so the walk runs off the end of the chain and recognition's default is
+   * what runs.
    */
   it('hands a run the successor of a retired model, on either provider', async () => {
     await settings.setAiSettings({ model: 'claude-opus-5', apiKey: 'sk-ant-api-key-0000' });
@@ -190,23 +191,36 @@ describe.skipIf(!handle)('which model a run is given', () => {
     await settings.setAiModel('gpt-5.6-terra', 'openai');
     const openai = new AiDeviceMapper(db, settings, log);
     await openai.requestMapping(lamp, mapExposes(lamp), { force: true });
-    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.1-sol']));
+    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.2-sol']));
 
     await resetDb(db);
     settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     await settings.setAiKey('openai', 'sk-openai-key-0000');
-    // The default until GPT-6.1 Sol: a home that never chose is on it too.
-    await settings.setAiModel('gpt-6-sol', 'openai');
+    // The default until GPT-6.2 Sol: a home that never chose is on it too.
+    await settings.setAiModel('gpt-6.1-sol', 'openai');
     const sol = new AiDeviceMapper(db, settings, log);
     await sol.requestMapping(lamp, mapExposes(lamp), { force: true });
-    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.1-sol']));
-    expect(modelsGiven(createOpenAiMappingAgent)).not.toContain('gpt-6-sol');
+    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.2-sol']));
+    expect(modelsGiven(createOpenAiMappingAgent)).not.toContain('gpt-6.1-sol');
+
+    // And the dearer rung keeps its rung: GPT-6 Astra runs GPT-6.2 Astra. The
+    // calls are counted from here, since the runs above are this test's too.
+    await resetDb(db);
+    settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    await settings.setAiKey('openai', 'sk-openai-key-0000');
+    await settings.setAiModel('gpt-6-astra', 'openai');
+    const before = modelsGiven(createOpenAiMappingAgent).length;
+    const astra = new AiDeviceMapper(db, settings, log);
+    await astra.requestMapping(lamp, mapExposes(lamp), { force: true });
+    const given = modelsGiven(createOpenAiMappingAgent).slice(before);
+    expect(given.length).toBeGreaterThan(0);
+    expect(new Set(given)).toEqual(new Set(['gpt-6.2-astra']));
   });
 
   /**
    * **And nothing is written back**, which is the whole of why this is safe to
    * roll back. `install.sh` puts the previous build back when a new one fails
-   * its health check; that build has never heard of `gpt-6.1-sol`, and an agent
+   * its health check; that build has never heard of `gpt-6.2-sol`, and an agent
    * column it reads with an unknown id falls to "the first vendor with a usable
    * key" — a home that chose OpenAI would silently move to Anthropic. The
    * column still saying what somebody chose is what keeps the older build
@@ -220,7 +234,7 @@ describe.skipIf(!handle)('which model a run is given', () => {
     await settings.setAutomationsModel('claude-opus-5');
 
     const ai = await settings.getAiSettings();
-    expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6.2-sol');
     expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-terra' });
     expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5' });
 
@@ -251,11 +265,13 @@ describe('which model an agent is given once its own is retired', () => {
       provider: 'anthropic',
       modelId: 'claude-sonnet-5-5',
     });
-    expect(effectiveAgentModel('gpt-6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    expect(effectiveAgentModel('gpt-6.1-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.2-sol' });
+    expect(effectiveAgentModel('gpt-6-astra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.2-astra' });
     // Down a chain again: GPT-5.6 Sol was replaced by GPT-6 Sol, which GPT-6.1
-    // Sol has replaced in turn.
-    expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
-    expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    // Sol and then GPT-6.2 Sol have replaced in turn.
+    expect(effectiveAgentModel('gpt-6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.2-sol' });
+    expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.2-sol' });
+    expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.2-sol' });
     // And a tier keeps its tier: GPT-5.6 Terra went to Sol only while GPT-6
     // had no Terra, and is GPT-6.1 Terra's now there is one.
     expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-terra' });
@@ -315,6 +331,8 @@ describe('the model table', () => {
       'claude-sonnet-4-6',
     ],
     openai: [
+      'gpt-6.2-astra',
+      'gpt-6.2-sol',
       'gpt-6-astra',
       'gpt-6.1-sol',
       'gpt-6.1-terra',
@@ -393,8 +411,8 @@ describe('the agents’ tiers, read across the vendors', () => {
 
   it('answers each of today’s models with the other vendor’s on its tier, both ways round', () => {
     const pairs = [
-      ['claude-fable-5-2', 'gpt-6-astra'],
-      ['claude-opus-5-5', 'gpt-6.1-sol'],
+      ['claude-fable-5-2', 'gpt-6.2-astra'],
+      ['claude-opus-5-5', 'gpt-6.2-sol'],
       ['claude-sonnet-5-5', 'gpt-6.1-terra'],
       ['claude-haiku-5-5', 'gpt-6-luna'],
     ] as const;
@@ -475,8 +493,8 @@ describe('the agents’ tiers, read across the vendors', () => {
 describe('naming a model that has already run', () => {
   it('uses the model’s own name while it is offered', () => {
     expect(modelLabel('anthropic', 'claude-opus-5-5')).toBe('Opus 5.5');
-    expect(modelLabel('openai', 'gpt-6.1-sol')).toBe('GPT-6.1 Sol');
-    expect(modelLabel('openai', 'gpt-6-astra')).toBe('GPT-6 Astra');
+    expect(modelLabel('openai', 'gpt-6.2-sol')).toBe('GPT-6.2 Sol');
+    expect(modelLabel('openai', 'gpt-6.2-astra')).toBe('GPT-6.2 Astra');
   });
 
   /**
@@ -531,8 +549,12 @@ describe('naming a model that has already run', () => {
     expect(modelLabel('anthropic', 'claude-opus-5')).toBe('Opus 5');
     expect(modelLabel('anthropic', 'claude-opus-4-6')).toBe('Opus 4.6');
     expect(modelLabel('openai', 'gpt-5.6-terra')).toBe('GPT-5.6 Terra');
-    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.2-sol');
     expect(modelLabel('openai', 'gpt-6-sol')).toBe('GPT-6 Sol');
+    expect(effectiveModel('openai', 'gpt-6.1-sol')).toBe('gpt-6.2-sol');
+    expect(modelLabel('openai', 'gpt-6.1-sol')).toBe('GPT-6.1 Sol');
+    expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6.2-astra');
+    expect(modelLabel('openai', 'gpt-6-astra')).toBe('GPT-6 Astra');
     // The same for a chat on the cheaper tier: it ran on Sonnet 5, whatever
     // runs in its place now.
     expect(effectiveAgentModel('claude-sonnet-5', { anthropic: true, openai: true })?.modelId).toBe(

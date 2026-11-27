@@ -191,7 +191,7 @@ export function voiceFailure(error: unknown): { text: string; failure: VoiceFail
  * button that answers for it must not quietly spend four times as much — nor
  * answer a question sent to the most capable model with the other vendor's
  * everyday one. GPT-6.1 Terra is answered again by
- * Sonnet 5.5, Haiku 5.5 by GPT-6 Luna, Opus 5.5 by GPT-6.1 Sol. It was the
+ * Sonnet 5.5, Haiku 5.5 by GPT-6 Luna, Opus 5.5 by GPT-6.2 Sol. It was the
  * other vendor's default whatever had failed, which offered Opus 5.5 to a chat
  * on Terra.
  */

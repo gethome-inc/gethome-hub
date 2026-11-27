@@ -502,7 +502,7 @@ describe('the four chat routes', () => {
     expect((unknown.json() as { detail?: string }).detail).toBeTruthy();
 
     // Offered, but on a vendor this home holds no key for.
-    const otherVendor = await post('/api/v1/automations/chat', { message: 'hi', model: 'gpt-6.1-sol' });
+    const otherVendor = await post('/api/v1/automations/chat', { message: 'hi', model: 'gpt-6.2-sol' });
     expect(otherVendor.statusCode).toBe(409);
     expect(otherVendor.json()).toMatchObject({ error: 'model_unavailable' });
     expect((otherVendor.json() as { detail: string }).detail).toContain('OpenAI');

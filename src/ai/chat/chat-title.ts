@@ -1,6 +1,7 @@
 import type { AiProvider } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
 import { estimateCostUsd, TITLE_MODELS, type UsableProviders } from '../models.js';
+import { developerMessage } from '../openai-wire.js';
 
 /**
  * A conversation's name, from what the person said first.
@@ -296,8 +297,9 @@ async function askOpenAi(ask: TitleAsk): Promise<TitleAnswer> {
     signal: ask.signal,
     body: JSON.stringify({
       model: ask.modelId,
-      instructions: ask.instructions,
-      input: [{ role: 'user', content: ask.prompt }],
+      // Ahead of the words being named, as every OpenAI request here sends its
+      // instructions (`developerMessage`).
+      input: [developerMessage(ask.instructions), { role: 'user', content: ask.prompt }],
       reasoning: { effort: 'low' },
       max_output_tokens: TITLE_MAX_TOKENS,
       store: false,

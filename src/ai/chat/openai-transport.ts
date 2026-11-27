@@ -2,6 +2,7 @@ import type { Logger } from '../../logging.js';
 import { AiUnavailableError, classifyAgentFailure, classifyApiError, errorCodeIn } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
+import { developerMessage } from '../openai-wire.js';
 import {
   haltedBy,
   refusalSentence,
@@ -409,8 +410,12 @@ async function streamResponse(request: {
       signal: request.signal,
       body: JSON.stringify({
         model: request.modelId,
-        instructions: request.systemPrompt,
-        input: request.input,
+        // The system prompt as the first `developer` item rather than as
+        // top-level `instructions`: from GPT-6.2 on, `instructions` go after
+        // `input` and are billed uncached on every round, so a prompt the
+        // conversation never changes would be paid for in full each time. As
+        // the first item it heads the prefix the API caches, on every model.
+        input: [developerMessage(request.systemPrompt), ...request.input],
         tools: request.tools,
         stream: true,
         // Required for a stateless multi-turn reasoning run: without this the

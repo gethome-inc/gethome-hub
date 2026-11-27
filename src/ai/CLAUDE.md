@@ -63,8 +63,8 @@ domains — update them in the same change.
   lopsided because a descriptor is cached per device *model* and shapes every
   unit of it the home ever meets until somebody remaps; a few cents on a job
   that runs a handful of times in a hub's life does not buy that risk. That is
-  an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above
-  GPT-6.1 Sol and Anthropic offers Fable 5.2 above Opus 5.5 — and the test pins
+  an argument about *cheaper* models, so OpenAI offers GPT-6.2 Astra above
+  GPT-6.2 Sol and Anthropic offers Fable 5.2 above Opus 5.5 — and the test pins
   the invariant, not a count. The half that is easy to miss is
   **`effectiveModel`: a stored model counts only while it is still offered**,
   or retiring one leaves the homes that had chosen it as the only homes still
@@ -76,7 +76,8 @@ domains — update them in the same change.
   **What runs instead is the retired model's successor**, and that is one table
   rather than three (`MODELS` in `models.ts`: a row per model the hub has ever
   run, carrying its price, its name and the model that replaced it — Opus 5 →
-  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol,
+  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol →
+  GPT-6.2 Sol, GPT-6 Astra → GPT-6.2 Astra,
   GPT-5.6 Terra → GPT-6.1 Terra). Three rules, and **a tier keeps its tier**
   beside them: a Sonnet's successor is the next Sonnet and a Terra's the next
   Terra, pointing at the nearest rung only while the vendor has nothing on its
@@ -109,7 +110,7 @@ domains — update them in the same change.
   `AGENT_MAX_BUDGET_USD` per recognition run, `ASSISTANT_MAX_BUDGET_USD` and
   `AUTOMATION_MAX_BUDGET_USD` per conversation — was sized against Opus 5's
   $5/$25, and `budgetScale(modelId)` stretches it for a model priced above that
-  (GPT-6 Astra ×2, Fable 5.2 ×1.6). Without it the most thorough model a home
+  (Fable 5.2 and GPT-6.2 Astra ×1.6; GPT-6 Astra, no longer offered, ×2). Without it the most thorough model a home
   could pick would be the one stopped part way through the work; a cheaper model keeps
   the same ceiling, never a tighter one. A new cap goes through it too.
   **And what is measured against them is priced a request at a time**: every
@@ -753,6 +754,15 @@ domains — update them in the same change.
   with `summary: 'auto'` as that vendor's spelling of the summarized-thinking
   lesson, `store: false`, and an SSE parser that **buffers across chunks**,
   since a frame split mid-delta is the ordinary case rather than the edge.
+  **Every OpenAI request sends its system prompt as the first `developer` item
+  of `input`, never as top-level `instructions`** (`developerMessage`,
+  `openai-wire.ts` — this transport, `openai-agent.ts` and the name a
+  conversation gets). From GPT-6.2 on the API appends `instructions` *after*
+  `input` and bills them uncached on every request, so the one part of a
+  conversation that never changes would be the one part never cached; at the
+  head of `input` it is the start of the cached prefix on every model. The
+  same release drops the reasoning carried with an earlier item that is
+  edited — which no loop here does: a conversation is only ever appended to.
   `chat/transport.ts` picks one behind a **dynamic import**, so a home with one
   key never loads the other vendor's client. `test/ai-openai-chat.test.ts`
   stubs `fetch` with a real SSE body rather than a parsed object, for the reason
@@ -803,7 +813,7 @@ domains — update them in the same change.
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
   **The agents' model list is its own** (`AGENT_MODELS` — Fable 5.2, Opus 5.5,
-  Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol, GPT-6.1
+  Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6.2 Astra, GPT-6.2 Sol, GPT-6.1
   Terra and GPT-6 Luna on OpenAI: the same four rungs on both), and the
   mapper's list stays strong-only: a descriptor is
   cached against a device model and shapes every unit of it for ever, while a

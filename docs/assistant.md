@@ -12,7 +12,7 @@ scenes, says what it can and cannot do — and hands the jobs that belong to
 another agent over to it.
 
 It runs on **either vendor**, on a model the home chooses: **Fable 5.2**, **Opus
-5.5**, **Sonnet 5.5** or **Haiku 5.5** on Anthropic, **GPT-6 Astra**, **GPT-6.1
+5.5**, **Sonnet 5.5** or **Haiku 5.5** on Anthropic, **GPT-6.2 Astra**, **GPT-6.2
 Sol**, **GPT-6.1 Terra** or **GPT-6 Luna** on OpenAI — the same four rungs on
 both. That list is its own rather than the mapper's, and the difference is the
 trade: a mapping descriptor is cached against a device *model* and shapes every
@@ -22,12 +22,13 @@ read the moment they arrive and answered with another message when the reply is
 poor — so what a round costs is a real choice somebody can make, and both halves
 of it are visible. **A home that chose a model this build has retired is moved
 to the one that replaced it** — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5,
-GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra, each on
+GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol → GPT-6.2 Sol, GPT-6 Astra → GPT-6.2 Astra,
+GPT-5.6 Terra → GPT-6.1 Terra, each on
 its own tier — on the vendor it chose, resolved whenever the settings are read
 and never written back (`src/ai/models.ts` says why that is the rollback-safe
 half). **Its $0.50 cap is in the model's own dollars**: it was sized against
-Opus 5, so `budgetScale` stretches it for GPT-6 Astra, at twice that price, and
-Fable 5.2, at 1.6 times, and a conversation on the most capable model is not cut
+Opus 5, so `budgetScale` stretches it for GPT-6.2 Astra and Fable 5.2, at 1.6
+times that price, and a conversation on the most capable model is not cut
 off part way through the rounds.
 
 **It was Anthropic-only, and not as a policy.** `chat/agent-loop.ts` typed every
@@ -1060,7 +1061,7 @@ model is told what, which stays done. The transcript keeps both, and a retry on
 another model still finds them.
 
 **A note that ends a failed round says which model failed and why, and offers
-the other vendor's** (`chat/failure.ts`): *GPT-6.1 Sol couldn't answer: this
+the other vendor's** (`chat/failure.ts`): *GPT-6.2 Sol couldn't answer: this
 home's OpenAI account is out of credit.*, with `data.failure` naming the model
 and the kind, and `data.switchTo` the other vendor's model on the same tier
 where this home has that key — a chat on GPT-6.1 Terra is offered Sonnet 5.5,
