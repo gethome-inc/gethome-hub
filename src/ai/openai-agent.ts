@@ -24,6 +24,7 @@ import {
 } from './agent-core.js';
 import { budgetScale, defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
+import { developerMessage } from './openai-wire.js';
 
 /**
  * The mapping agent on OpenAI's Responses API — the same run as `agent.ts`,
@@ -334,8 +335,9 @@ async function askOpenAi(
       signal,
       body: JSON.stringify({
         model: modelId,
-        instructions: systemPrompt,
-        input,
+        // First in `input`, never as `instructions`, which GPT-6.2 sends after
+        // the conversation and bills uncached every turn (`developerMessage`).
+        input: [developerMessage(systemPrompt), ...input],
         // Required for a stateless multi-turn reasoning run: without this the
         // API may omit the opaque reasoning content that must be replayed with
         // the next turn.

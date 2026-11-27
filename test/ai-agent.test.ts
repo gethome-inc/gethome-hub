@@ -267,8 +267,8 @@ describe('supported models', () => {
   });
 
   /**
-   * Fable 5.2 is offered on Anthropic where GPT-6 Astra is on OpenAI: above the
-   * default, at $8/$40 against Astra's $10/$50. Fable 5.1 before it is still
+   * Fable 5.2 is offered on Anthropic where GPT-6.2 Astra is on OpenAI: above
+   * the default, at the same $8/$40. Fable 5.1 before it is still
    * known — a home may have stored it, and runs recorded on it are priced and
    * named from its row — and never offered. Their siblings Mythos 5.1 and 5.2
    * share their weights and are only for organisations Anthropic has verified,
@@ -327,9 +327,9 @@ describe('supported models', () => {
       'claude-fable-5-2',
       'claude-opus-5-5',
     ]);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6.2-astra', 'gpt-6.2-sol']);
     expect(defaultModelFor('anthropic')).toBe('claude-opus-5-5');
-    expect(defaultModelFor('openai')).toBe('gpt-6.1-sol');
+    expect(defaultModelFor('openai')).toBe('gpt-6.2-sol');
 
     // Retired from the picker, still known: a run recorded months ago names
     // the model it ran on, and a stored setting naming one must still be taken.
@@ -339,6 +339,10 @@ describe('supported models', () => {
     expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
     expect(isSupportedModel('gpt-6-sol', 'openai')).toBe(true);
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-sol')).toBe(false);
+    expect(isSupportedModel('gpt-6.1-sol', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6.1-sol')).toBe(false);
+    expect(isSupportedModel('gpt-6-astra', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-astra')).toBe(false);
     expect(isSupportedModel('claude-fable-5-1', 'anthropic')).toBe(true);
     expect(PROVIDER_MODELS.anthropic.choices.some((choice) => choice.id === 'claude-fable-5-1')).toBe(false);
 
@@ -356,7 +360,7 @@ describe('supported models', () => {
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-luna')).toBe(false);
     expect(isSupportedModel('gpt-6.1-terra', 'openai')).toBe(true);
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6.1-terra')).toBe(false);
-    expect(effectiveModel('openai', 'gpt-6.1-terra')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-6.1-terra')).toBe('gpt-6.2-sol');
     // A model this hub has never run is not accepted at all.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
   });
@@ -371,26 +375,29 @@ describe('supported models', () => {
   it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
     expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
-    // GPT-6 Sol is replaced by GPT-6.1 Sol, and GPT-5.6 Sol, which it had
-    // replaced, walks on down the same chain. GPT-5.6 Terra's successor is
-    // GPT-6.1 Terra, which this list does not offer, so it runs the default —
-    // the same answer for a different reason.
-    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
-    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.1-sol');
-    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.1-sol');
+    // GPT-6.1 Sol is replaced by GPT-6.2 Sol, and GPT-6 Sol and GPT-5.6 Sol,
+    // which it had replaced in turn, walk on down the same chain. GPT-6 Astra
+    // is replaced by GPT-6.2 Astra, on its own rung. GPT-5.6 Terra's successor
+    // is GPT-6.1 Terra, which this list does not offer, so it runs the default
+    // — the same answer for a different reason.
+    expect(effectiveModel('openai', 'gpt-6.1-sol')).toBe('gpt-6.2-sol');
+    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.2-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.2-sol');
+    expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6.2-astra');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.2-sol');
     // The bare alias was never offered, so it was never a preference either.
-    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6.2-sol');
     // Offered to the agents and not here: the default, never the cheap tier.
     expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-haiku-5-5')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6.2-sol');
     // Nor at the end of a chain: Sonnet 5 is succeeded by Sonnet 5.5, which
     // this list does not offer either.
     expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
 
     // A model still on the list is still honoured, and so is silence.
     expect(effectiveModel('anthropic', 'claude-opus-5-5')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6-astra');
+    expect(effectiveModel('openai', 'gpt-6.2-astra')).toBe('gpt-6.2-astra');
     expect(effectiveModel('anthropic', 'claude-fable-5-2')).toBe('claude-fable-5-2');
     // Fable 5.1 keeps its rung: it walks to Fable 5.2, never down to Opus.
     expect(effectiveModel('anthropic', 'claude-fable-5-1')).toBe('claude-fable-5-2');
@@ -431,7 +438,8 @@ describe('supported models', () => {
     expect(
       estimateCostUsd('claude-sonnet-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(12, 5);
-    // Fable 5.1 is GPT-6 Astra's $10/$50, and Fable 5.2 a fifth less, $8/$40.
+    // Fable 5.1 is GPT-6 Astra's $10/$50, and Fable 5.2 a fifth less, $8/$40 —
+    // as GPT-6.2 Astra is.
     expect(
       estimateCostUsd('claude-fable-5-1', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(60, 5);
@@ -442,9 +450,12 @@ describe('supported models', () => {
     // prices are checked on a prompt short of either line (`longPrompt`).
     const short = { input_tokens: 100_000, output_tokens: 100_000 };
     expect(estimateCostUsd('gpt-6-astra', short)).toBeCloseTo(6, 5);
+    expect(estimateCostUsd('gpt-6.2-astra', short)).toBeCloseTo(4.8, 5);
     expect(estimateCostUsd('gpt-6-sol', short)).toBeCloseTo(1.2, 5);
-    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10, and GPT-6.1 Terra is half of it.
+    // GPT-6.1 Sol and GPT-6.2 Sol kept GPT-6 Sol's $2/$10, and GPT-6.1 Terra
+    // is half of it.
     expect(estimateCostUsd('gpt-6.1-sol', short)).toBeCloseTo(1.2, 5);
+    expect(estimateCostUsd('gpt-6.2-sol', short)).toBeCloseTo(1.2, 5);
     expect(estimateCostUsd('gpt-6.1-terra', short)).toBeCloseTo(0.6, 5);
     expect(estimateCostUsd('gpt-6-luna', short)).toBeCloseTo(0.06, 5);
     expect(estimateCostUsd('claude-haiku-5-5', short)).toBeCloseTo(0.06, 5);
@@ -457,14 +468,19 @@ describe('supported models', () => {
    * included — and a prompt exactly on the line is still the cheaper one.
    */
   it('prices a long prompt at the vendor’s long-prompt rates', () => {
-    expect(estimateCostUsd('gpt-6.1-sol', { input_tokens: 272_000 })).toBeCloseTo(0.544, 5);
-    expect(estimateCostUsd('gpt-6.1-sol', { input_tokens: 300_000, output_tokens: 10_000 })).toBeCloseTo(1.35, 5);
+    expect(estimateCostUsd('gpt-6.2-sol', { input_tokens: 272_000 })).toBeCloseTo(0.544, 5);
+    expect(estimateCostUsd('gpt-6.2-sol', { input_tokens: 300_000, output_tokens: 10_000 })).toBeCloseTo(1.35, 5);
     // 100K uncached and 200K read from the cache is a 300K prompt: both at twice
     // their usual rate, $0.40 and $0.04.
     expect(
-      estimateCostUsd('gpt-6.1-sol', { input_tokens: 100_000, cache_read_input_tokens: 200_000 }),
+      estimateCostUsd('gpt-6.2-sol', { input_tokens: 100_000, cache_read_input_tokens: 200_000 }),
     ).toBeCloseTo(0.44, 5);
     expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(95, 5);
+    // GPT-6.2 Astra shares the same line and multipliers, on its $8/$40.
+    expect(estimateCostUsd('gpt-6.2-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(
+      76,
+      5,
+    );
 
     expect(estimateCostUsd('claude-haiku-5-5', { input_tokens: 100_000, output_tokens: 10_000 })).toBeCloseTo(
       0.015,
@@ -500,12 +516,20 @@ describe('supported models', () => {
     expect(estimateCostUsd('claude-opus-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
     // Writes are the usual 1.25x of $4.
     expect(estimateCostUsd('claude-opus-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(5, 5);
-    // Sonnet 5.5 and GPT-6.1 Sol read at a twentieth of $2 — half what their
-    // predecessors charged for the same read — and write at the usual 1.25x.
+    // Sonnet 5.5, GPT-6.1 Sol and GPT-6.2 Sol read at a twentieth of $2 — half
+    // what their predecessors charged for the same read — and write at the
+    // usual 1.25x.
     expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.1, 5);
     expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.01, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(0.25, 5);
+    expect(estimateCostUsd('gpt-6.2-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.01, 5);
+    expect(estimateCostUsd('gpt-6.2-sol', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(0.25, 5);
+    // GPT-6.2 Astra reads at the same twentieth, of $8 — where GPT-6 Astra
+    // read at a tenth of $10, two and a half times as much — and writes at
+    // 1.25x: $0.04 and $1 for 100K.
+    expect(estimateCostUsd('gpt-6.2-astra', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.04, 5);
+    expect(estimateCostUsd('gpt-6.2-astra', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(1, 5);
     // GPT-6.1 Terra reads at the same twentieth, of $1: $0.05 a million —
     // asked of a prompt short of GPT-6's long-prompt line, as Sol's is.
     expect(estimateCostUsd('gpt-6.1-terra', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.005, 6);
@@ -519,12 +543,14 @@ describe('supported models', () => {
 
   /**
    * The caps are dollars sized against Opus 5, so a model priced above it
-   * would stop at a fraction of the work — GPT-6 Astra at half. The scale is
+   * would stop at a fraction of the work — GPT-6.2 Astra at five eighths. The scale is
    * never below one: a cheaper model keeps the same ceiling rather than a
    * tighter one.
    */
   it('stretches the spend caps for a model priced above the one they were set against', () => {
     expect(budgetScale('gpt-6-astra')).toBeCloseTo(2, 5);
+    expect(budgetScale('gpt-6.2-astra')).toBeCloseTo(1.6, 5);
+    expect(budgetScale('gpt-6.2-sol')).toBe(1);
     expect(budgetScale('claude-fable-5-1')).toBeCloseTo(2, 5);
     // $8/$40 against $5/$25: both rates 1.6 times the reference.
     expect(budgetScale('claude-fable-5-2')).toBeCloseTo(1.6, 5);

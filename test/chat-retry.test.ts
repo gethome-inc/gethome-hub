@@ -139,12 +139,12 @@ describe('a round that could not be answered', () => {
     });
     return (response.json() as { messages: Row[] }).messages;
   };
-  /** A conversation whose first message failed on GPT-6.1 Sol. */
+  /** A conversation whose first message failed on GPT-6.2 Sol. */
   const failedOnOpenAi = async (surface: string, payload: object = {}): Promise<string> => {
-    failures.set('gpt-6.1-sol', new AiUnavailableError('billing', '402 {"error":{"message":"You exceeded your current quota."}}'));
+    failures.set('gpt-6.2-sol', new AiUnavailableError('billing', '402 {"error":{"message":"You exceeded your current quota."}}'));
     const started = await post(`/api/v1/${surface}/chat`, {
       message: 'switch the hall light on',
-      model: 'gpt-6.1-sol',
+      model: 'gpt-6.2-sol',
       ...payload,
     });
     expect(started.statusCode).toBe(201);
@@ -257,9 +257,9 @@ describe('a round that could not be answered', () => {
       const rows = await read(surface, sessionId);
       expect(rows.map((row) => row.role)).toEqual(['user', 'note']);
       // A sentence somebody can act on — never the provider's status and JSON.
-      expect(rows[1]!.text).toBe('GPT-6.1 Sol couldn’t answer: this home’s OpenAI account is out of credit.');
+      expect(rows[1]!.text).toBe('GPT-6.2 Sol couldn’t answer: this home’s OpenAI account is out of credit.');
       expect(rows[1]!.data).toMatchObject({
-        failure: { provider: 'openai', model: 'gpt-6.1-sol', kind: 'billing' },
+        failure: { provider: 'openai', model: 'gpt-6.2-sol', kind: 'billing' },
         switchTo: { model: 'claude-opus-5-5', label: 'Opus 5.5', provider: 'anthropic' },
       });
       // Credit is not something asking the same model again would fix.
@@ -276,7 +276,7 @@ describe('a round that could not be answered', () => {
       const rows = await read(surface, sessionId);
       expect(rows.map((row) => [row.role, row.text])).toEqual([
         ['user', 'switch the hall light on'],
-        ['note', 'GPT-6.1 Sol couldn’t answer: this home’s OpenAI account is out of credit.'],
+        ['note', 'GPT-6.2 Sol couldn’t answer: this home’s OpenAI account is out of credit.'],
         ['agent', 'claude-opus-5-5 answered.'],
       ]);
       // The note says where the conversation went, and a phone showing it
@@ -389,8 +389,8 @@ describe('a round that could not be answered', () => {
   });
 
   it('offers the other vendor when the model declined, too', async () => {
-    refusals.add('gpt-6.1-sol');
-    const started = await post('/api/v1/assistant/chat', { message: 'is my front door secure?', model: 'gpt-6.1-sol' });
+    refusals.add('gpt-6.2-sol');
+    const started = await post('/api/v1/assistant/chat', { message: 'is my front door secure?', model: 'gpt-6.2-sol' });
     await idle();
     const { sessionId } = started.json() as { sessionId: string };
     const rows = await read('assistant', sessionId);
@@ -398,7 +398,7 @@ describe('a round that could not be answered', () => {
       role: 'note',
       text: 'The model declined to answer that.',
       data: {
-        failure: { provider: 'openai', model: 'gpt-6.1-sol', kind: 'refused' },
+        failure: { provider: 'openai', model: 'gpt-6.2-sol', kind: 'refused' },
         switchTo: { model: 'claude-opus-5-5' },
       },
     });
@@ -415,11 +415,11 @@ describe('a round that could not be answered', () => {
   });
 
   it('leaves a declined message out of the model’s memory, and on the page', async () => {
-    refusals.add('gpt-6.1-sol');
-    before.set('gpt-6.1-sol', [['Working a device', 'writing', 'Porch light → on', true]]);
+    refusals.add('gpt-6.2-sol');
+    before.set('gpt-6.2-sol', [['Working a device', 'writing', 'Porch light → on', true]]);
     const started = await post('/api/v1/assistant/chat', {
       message: 'porch light on, then tell me how to get past my alarm',
-      model: 'gpt-6.1-sol',
+      model: 'gpt-6.2-sol',
     });
     await idle();
     const { sessionId } = started.json() as { sessionId: string };
@@ -445,44 +445,44 @@ describe('a round that could not be answered', () => {
       ['user', 'porch light on, then tell me how to get past my alarm'],
       ['note', 'The model declined to answer that.'],
       ['user', 'just the porch light, then'],
-      ['agent', 'gpt-6.1-sol answered.'],
+      ['agent', 'gpt-6.2-sol answered.'],
     ]);
   });
 
   it('offers nothing it cannot run, and asking the same model again is still allowed', async () => {
     await settings.clearAiProvider('anthropic');
-    failures.set('gpt-6.1-sol', new AiUnavailableError('overloaded', '529 overloaded'));
-    const started = await post('/api/v1/assistant/chat', { message: 'hello', model: 'gpt-6.1-sol' });
+    failures.set('gpt-6.2-sol', new AiUnavailableError('overloaded', '529 overloaded'));
+    const started = await post('/api/v1/assistant/chat', { message: 'hello', model: 'gpt-6.2-sol' });
     await idle();
     const { sessionId } = started.json() as { sessionId: string };
     const rows = await read('assistant', sessionId);
-    expect(rows[1]!.text).toBe('GPT-6.1 Sol couldn’t answer: OpenAI is overloaded right now.');
+    expect(rows[1]!.text).toBe('GPT-6.2 Sol couldn’t answer: OpenAI is overloaded right now.');
     expect(rows[1]!.data).toMatchObject({ failure: { kind: 'overloaded', transient: true } });
     expect(rows[1]!.data).not.toHaveProperty('switchTo');
 
     failures.clear();
-    const again = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'gpt-6.1-sol' });
+    const again = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'gpt-6.2-sol' });
     expect(again.statusCode).toBe(202);
     await idle();
-    expect((await read('assistant', sessionId)).at(-1)).toMatchObject({ role: 'agent', text: 'gpt-6.1-sol answered.' });
+    expect((await read('assistant', sessionId)).at(-1)).toMatchObject({ role: 'agent', text: 'gpt-6.2-sol answered.' });
     // Even on the same model, on a conversation opened for it — told why —
     // rather than on the history the failed round left behind.
-    expect(asked.at(-1)).toMatchObject({ model: 'gpt-6.1-sol' });
+    expect(asked.at(-1)).toMatchObject({ model: 'gpt-6.2-sol' });
     expect(asked.at(-1)!.text).toContain('the model it went to could not answer it');
   });
 
   it('tells the model asked again what the failed round had already done', async () => {
-    before.set('gpt-6.1-sol', [
+    before.set('gpt-6.2-sol', [
       ['Looking at your home', 'reading', 'Hall light'],
       ['Working a device', 'writing', 'Hall light → on', true],
       // Tried, and it did not take — never told as done.
       ['Working a device', 'writing', 'Vacuum didn’t answer'],
       ['Could not hand that over', 'writing', 'That agent is not available.'],
     ]);
-    failures.set('gpt-6.1-sol', new AiUnavailableError('network', 'fetch failed'));
+    failures.set('gpt-6.2-sol', new AiUnavailableError('network', 'fetch failed'));
     const started = await post('/api/v1/assistant/chat', {
       message: 'hall light on and start the vacuum',
-      model: 'gpt-6.1-sol',
+      model: 'gpt-6.2-sol',
     });
     await idle();
     const { sessionId } = started.json() as { sessionId: string };
@@ -554,8 +554,8 @@ describe('a round that could not be answered', () => {
       new Promise<void>((resolve) => (releaseFirst = resolve)),
       new Promise<void>((resolve) => (releaseSecond = resolve)),
     );
-    failures.set('gpt-6.1-sol', new AiUnavailableError('overloaded', '529 overloaded'));
-    const started = await post('/api/v1/assistant/chat', { message: 'FIRST', model: 'gpt-6.1-sol' });
+    failures.set('gpt-6.2-sol', new AiUnavailableError('overloaded', '529 overloaded'));
+    const started = await post('/api/v1/assistant/chat', { message: 'FIRST', model: 'gpt-6.2-sol' });
     const { sessionId } = started.json() as { sessionId: string };
     await until(() => asked.length === 1, 'the first round');
     await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'SECOND' });
@@ -581,8 +581,8 @@ describe('a round that could not be answered', () => {
     expect(asking.statusCode).toBe(202);
     await idle();
     expect(asked.map((entry) => [entry.model, entry.text.split('\n').at(-1)])).toEqual([
-      ['gpt-6.1-sol', 'FIRST'],
-      ['gpt-6.1-sol', 'SECOND'],
+      ['gpt-6.2-sol', 'FIRST'],
+      ['gpt-6.2-sol', 'SECOND'],
       ['claude-opus-5-5', 'SECOND'],
     ]);
   });
@@ -730,21 +730,21 @@ describe('the words on a failure', () => {
 
   it('gives anything else in the provider’s own words, without the envelope', () => {
     const error = new Error('400 {"type":"error","error":{"type":"invalid_request_error","message":"Bad thing"}}');
-    expect(failureSentence('openai', 'gpt-6.1-sol', error)).toEqual({
+    expect(failureSentence('openai', 'gpt-6.2-sol', error)).toEqual({
       kind: 'failed',
-      text: 'GPT-6.1 Sol couldn’t answer: Bad thing.',
+      text: 'GPT-6.2 Sol couldn’t answer: Bad thing.',
     });
   });
 
   it('offers the other vendor’s model on the failed one’s tier, and only when it can run', () => {
-    expect(switchOffer('openai', 'gpt-6.1-sol', usable)).toEqual({
+    expect(switchOffer('openai', 'gpt-6.2-sol', usable)).toEqual({
       model: 'claude-opus-5-5',
       label: 'Opus 5.5',
       provider: 'anthropic',
     });
     expect(switchOffer('anthropic', 'claude-opus-5-5', usable)).toEqual({
-      model: 'gpt-6.1-sol',
-      label: 'GPT-6.1 Sol',
+      model: 'gpt-6.2-sol',
+      label: 'GPT-6.2 Sol',
       provider: 'openai',
     });
     // The quicker, cheaper tier is answered on the quicker, cheaper tier —
@@ -757,28 +757,28 @@ describe('the words on a failure', () => {
     expect(switchOffer('anthropic', 'claude-sonnet-5-5', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
     expect(switchOffer('openai', 'gpt-6-luna', usable)).toMatchObject({ model: 'claude-haiku-5-5' });
     expect(switchOffer('anthropic', 'claude-haiku-5-5', usable)).toMatchObject({ model: 'gpt-6-luna' });
-    expect(switchOffer('openai', 'gpt-6-astra', usable)).toMatchObject({ model: 'claude-fable-5-2' });
-    expect(switchOffer('anthropic', 'claude-fable-5-2', usable)).toMatchObject({ model: 'gpt-6-astra' });
+    expect(switchOffer('openai', 'gpt-6.2-astra', usable)).toMatchObject({ model: 'claude-fable-5-2' });
+    expect(switchOffer('anthropic', 'claude-fable-5-2', usable)).toMatchObject({ model: 'gpt-6.2-astra' });
     // A retired model is read as the one that replaced it, which keeps its tier.
-    expect(switchOffer('anthropic', 'claude-fable-5-1', usable)).toMatchObject({ model: 'gpt-6-astra' });
+    expect(switchOffer('anthropic', 'claude-fable-5-1', usable)).toMatchObject({ model: 'gpt-6.2-astra' });
     expect(switchOffer('openai', 'gpt-5.6-terra', usable)).toMatchObject({ model: 'claude-sonnet-5-5' });
     expect(switchOffer('anthropic', 'claude-sonnet-4-6', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
     // One this build never knew has no tier: the other vendor's default.
     expect(switchOffer('openai', 'gpt-7-nova', usable)).toMatchObject({ model: 'claude-opus-5-5' });
     // Nothing the home cannot run, and nothing for a vendor this build has no other for.
     expect(switchOffer('anthropic', 'claude-sonnet-5-5', { anthropic: true, openai: false })).toBeUndefined();
-    expect(switchOffer('someone-else', 'gpt-6.1-sol', usable)).toBeUndefined();
+    expect(switchOffer('someone-else', 'gpt-6.2-sol', usable)).toBeUndefined();
   });
 
   it('says asking again may work only where it may', () => {
     for (const kind of ['rate_limited', 'overloaded', 'network', 'aborted'] as const) {
-      expect(failureNote('openai', 'gpt-6.1-sol', kind, 'x', usable).data.failure.transient).toBe(true);
+      expect(failureNote('openai', 'gpt-6.2-sol', kind, 'x', usable).data.failure.transient).toBe(true);
     }
     for (const kind of ['billing', 'usage_limit', 'auth_failed', 'refused', 'unavailable', 'failed'] as const) {
-      expect(failureNote('openai', 'gpt-6.1-sol', kind, 'x', usable).data.failure).not.toHaveProperty('transient');
+      expect(failureNote('openai', 'gpt-6.2-sol', kind, 'x', usable).data.failure).not.toHaveProperty('transient');
     }
     // Settings that could not be read are no offer, never a second failure.
-    expect(failureNote('openai', 'gpt-6.1-sol', 'billing', 'x', undefined).data).not.toHaveProperty('switchTo');
+    expect(failureNote('openai', 'gpt-6.2-sol', 'billing', 'x', undefined).data).not.toHaveProperty('switchTo');
   });
 });
 
@@ -791,7 +791,7 @@ describe('which failure is asked again', () => {
     ...(data !== undefined ? { data } : {}),
   });
   const failed = (id: string, messageId?: string) =>
-    row(id, 'note', { failure: { provider: 'openai', model: 'gpt-6.1-sol', kind: 'overloaded', ...(messageId ? { messageId } : {}) } });
+    row(id, 'note', { failure: { provider: 'openai', model: 'gpt-6.2-sol', kind: 'overloaded', ...(messageId ? { messageId } : {}) } });
 
   it('answers the message the note names, and only while nothing of the person’s follows it', () => {
     expect(retryTarget([row('m1', 'user'), failed('n1', 'm1')])?.message.id).toBe('m1');
@@ -825,7 +825,7 @@ describe('which failure is asked again', () => {
     const refused = (id: string, messageId: string, retried?: boolean) =>
       row(id, 'note', {
         failure: { provider: 'anthropic', model: 'claude-opus-5-5', kind: 'refused', messageId },
-        ...(retried ? { retried: { model: 'gpt-6.1-sol' } } : {}),
+        ...(retried ? { retried: { model: 'gpt-6.2-sol' } } : {}),
       });
     expect([...declinedRows([row('m1', 'user'), refused('n1', 'm1')])].sort()).toEqual(['m1', 'n1']);
     expect([...declinedRows([row('m1', 'user'), refused('n1', 'm1', true)])]).toEqual([]);

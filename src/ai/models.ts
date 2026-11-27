@@ -40,14 +40,15 @@
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
  * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, Fable 5.1 → Fable 5.2,
- * GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra — and
- * only where there is no such model, the vendor's default. Four rules.
+ * GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol → GPT-6.2 Sol, GPT-6 Astra → GPT-6.2
+ * Astra, GPT-5.6 Terra → GPT-6.1 Terra — and only where there is no such
+ * model, the vendor's default. Four rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
  *    version that is safe to roll back. `install.sh` puts the previous build
  *    back when a new one fails its health check, and that build has never heard
- *    of `gpt-6.1-sol`: an agent column rewritten at boot would be an unknown id
+ *    of `gpt-6.2-sol`: an agent column rewritten at boot would be an unknown id
  *    there, which falls to "the first vendor with a usable key" and silently
  *    moves a home that had chosen OpenAI onto Anthropic. Left alone, the column
  *    still says what it said and the older build reads it exactly as before.
@@ -66,7 +67,7 @@
  *    rung does.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
- * pages (checked 9 October 2026). They move rarely, and the caps they feed are
+ * pages (checked 9 October 2026; GPT-6.2 on 27 November). They move rarely, and the caps they feed are
  * a safety rail rather than an invoice — `status.lastRun.costUsd` is an
  * estimate and says so.
  */
@@ -80,9 +81,9 @@ export interface ModelPricing {
   readonly outputPerMTok: number;
   /**
    * What a cached read costs, as a fraction of the input rate, where this model
-   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5, GPT-6.1
-   * Sol and GPT-6.1 Terra read at a twentieth and Fable 5.1 and 5.2 at a
-   * fortieth, and pricing them at a tenth would overstate every long
+   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5, GPT-6.2
+   * Astra, GPT-6.2 Sol, GPT-6.1 Sol and GPT-6.1 Terra read at a twentieth and
+   * Fable 5.1 and 5.2 at a fortieth, and pricing them at a tenth would overstate every long
    * conversation on them.
    */
   readonly cacheReadMultiplier?: number;
@@ -164,7 +165,7 @@ interface KnownModel {
  * half that price, and the quickest and cheapest. One vocabulary for every
  * vendor, so a model on one vendor's list can be read across to the other's.
  *
- * **A tier is the vendor's rung, not a price band**: Opus 5.5 and GPT-6.1 Sol
+ * **A tier is the vendor's rung, not a price band**: Opus 5.5 and GPT-6.2 Sol
  * are both `main` though Opus costs twice as much, because each is the model
  * its vendor recommends for this kind of work. The price is the tie-break
  * within a tier, never the other way round.
@@ -276,26 +277,55 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     },
   },
   openai: {
-    'gpt-6-astra': {
-      label: 'GPT-6 Astra',
-      price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
+    // $8/$40 — a fifth below GPT-6 Astra's $10/$50 — with a cached read at a
+    // twentieth ($0.40) and a write at the usual 1.25× (list prices, checked
+    // 27 November 2026), and GPT-6's long-prompt rates past 272K. Released on
+    // 17 November 2026 with GPT-6.2 Sol. It takes what GPT-6 Astra took: the
+    // Responses API with hosted web search, function tools and images, and
+    // `reasoning.effort` low, medium and high — it refuses only `none`, which
+    // nothing here sends. **Two things changed on the wire with GPT-6.2, and
+    // both are about what a request repeats.** Top-level `instructions` now
+    // go *after* `input` and are billed uncached on every request, so every
+    // OpenAI loop here sends its system prompt as the first `developer` item
+    // of `input` instead (`developerMessage` in `openai-wire.ts`). And an
+    // edit to an earlier item drops the reasoning carried with it, which no
+    // loop here makes: every conversation is only ever appended to.
+    'gpt-6.2-astra': {
+      label: 'GPT-6.2 Astra',
+      price: { inputPerMTok: 8, outputPerMTok: 40, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
       tier: 'top',
     },
-    // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
-    // Sol reads at the usual tenth. It takes the same requests: the Responses
-    // API with hosted web search and function tools, and `reasoning.effort`
-    // low, medium and high — it refuses only `none` and `minimal`, which
-    // nothing here sends.
-    'gpt-6.1-sol': {
-      label: 'GPT-6.1 Sol',
+    // GPT-6.1 Sol's price and its twentieth for a cached read ($0.10), and the
+    // same requests as GPT-6.2 Astra beside it. OpenAI's Sol tier from 17
+    // November 2026, and stronger than GPT-6.1 Sol for the same money.
+    'gpt-6.2-sol': {
+      label: 'GPT-6.2 Sol',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
       tier: 'main',
     },
+    // Still served, and replaced the way GPT-6 Sol was: GPT-6.2 Astra is
+    // cheaper and stronger, so nothing a home chose is lost by moving.
+    'gpt-6-astra': {
+      label: 'GPT-6 Astra',
+      price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      successor: 'gpt-6.2-astra',
+    },
+    // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
+    // Sol reads at the usual tenth. Still served, and replaced in the picker
+    // by GPT-6.2 Sol, which is the same price and stronger.
+    'gpt-6.1-sol': {
+      label: 'GPT-6.1 Sol',
+      price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      successor: 'gpt-6.2-sol',
+    },
     // Half GPT-6.1 Sol's price, with the same twentieth for a cached read
     // ($0.05), and OpenAI's quicker tier — about three times Sol's speed, by
-    // OpenAI's own figures. It takes what Sol takes: the Responses API with
+    // OpenAI's own figures. GPT-6.2 brought no Terra, so it is still the rung
+    // below GPT-6.2 Sol, at half its price. It takes what Sol takes: the Responses API with
     // function tools, images, and `reasoning.effort` low, medium and high (it
     // accepts `none` as well, which nothing here sends). Offered to the agents
     // only, as Sonnet 5.5 is: recognition never offers a tier cheaper than its
@@ -341,7 +371,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     // Terra after it, the way Sonnet 4.6 walks to Sonnet 5.5 and never to Opus.
     // It went to GPT-6 Sol while GPT-6 had no Terra. Recognition offers no
     // Terra, so a recognition setting naming it walks off the end of the chain
-    // and runs that list's default, GPT-6.1 Sol — where it already ran.
+    // and runs that list's default, GPT-6.2 Sol — where it already ran.
     'gpt-5.6-terra': {
       label: 'GPT-5.6 Terra',
       price: { inputPerMTok: 2, outputPerMTok: 12 },
@@ -386,7 +416,7 @@ function knownModel(provider: AiProvider, id: string): KnownModel | undefined {
  * argument is about *cheaper* models, and it is the invariant the tests keep;
  * a *more* thorough one costs more on a job that runs a handful of times in a
  * hub's life, which is a choice a home can make. So each vendor offers two —
- * Opus 5.5 by default with Fable 5.2 above it, GPT-6.1 Sol by default with
+ * Opus 5.5 by default with Fable 5.2 above it, GPT-6.2 Sol by default with
  * Astra above it — and Sonnet, Haiku and Luna are on neither list.
  *
  * Each named by an **explicit** id, never an alias: an alias is the vendor's to
@@ -404,10 +434,10 @@ export const PROVIDER_MODELS: Readonly<
     ],
   },
   openai: {
-    default: 'gpt-6.1-sol',
+    default: 'gpt-6.2-sol',
     choices: [
-      offer('openai', 'gpt-6-astra', 'OpenAI’s most thorough, at five times Sol’s price.'),
-      offer('openai', 'gpt-6.1-sol', 'Thorough, at a fifth of Astra’s price.', true),
+      offer('openai', 'gpt-6.2-astra', 'OpenAI’s most thorough, at four times Sol’s price.'),
+      offer('openai', 'gpt-6.2-sol', 'Thorough, at a quarter of Astra’s price.', true),
     ],
   },
 };
@@ -424,7 +454,7 @@ export const PROVIDER_MODELS: Readonly<
  * a fortieth of it, GPT-6.1 Terra at half Sol's and GPT-6 Luna at a twentieth
  * of it — four rungs a vendor, the same ladder on both (`AgentTier`, which
  * `agentCounterpart` reads across) — with the dearest of each vendor's above
- * the default, Fable 5.2 and GPT-6 Astra, as recognition offers them.
+ * the default, Fable 5.2 and GPT-6.2 Astra, as recognition offers them.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -448,10 +478,10 @@ export const AGENT_MODELS: Readonly<
     ],
   },
   openai: {
-    default: 'gpt-6.1-sol',
+    default: 'gpt-6.2-sol',
     choices: [
-      offer('openai', 'gpt-6-astra', 'OpenAI’s most capable, at five times Sol’s price.'),
-      offer('openai', 'gpt-6.1-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
+      offer('openai', 'gpt-6.2-astra', 'OpenAI’s most capable, at four times Sol’s price.'),
+      offer('openai', 'gpt-6.2-sol', 'Nearly as capable as Astra, at a quarter of the price.', true),
       offer('openai', 'gpt-6.1-terra', 'Quicker, and half the price of Sol.'),
       offer('openai', 'gpt-6-luna', 'The quickest and cheapest. Fine for simple requests.'),
     ],
@@ -584,7 +614,7 @@ export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
  * (`room-pictures/store.ts`'s `homeLocator`).
  *
  * **Never recognition's model.** It read on whatever recognition ran on, which
- * made a home that chose Fable 5.2 or GPT-6 Astra for its mappings pay their
+ * made a home that chose Fable 5.2 or GPT-6.2 Astra for its mappings pay their
  * price for a few points on a picture — and that list is strong-only for a
  * reason that is not this job's: a mapping is cached against a device model
  * for good, while a point in the wrong place is one drag from right and is
@@ -945,9 +975,9 @@ export function estimateCostUsd(model: string, usage: TokenUsage): number {
  * Every cap here — a recognition run's, an assistant conversation's, an
  * automations conversation's — was sized against Opus 5 at $5/$25, as "a run
  * that has spent this much has gone wrong". A model priced above that buys less
- * work for the same money, so on GPT-6 Astra ($10/$50) or Fable 5.2 ($8/$40) a
- * fixed cap would stop a perfectly healthy run at half or five eighths of the
- * work it allows everywhere else, and a paid run would end unfinished —
+ * work for the same money, so on Fable 5.2 or GPT-6.2 Astra (both $8/$40) a
+ * fixed cap would stop a perfectly healthy run at five eighths of the work it
+ * allows everywhere else, and a paid run would end unfinished —
  * somebody would have chosen the most thorough model and got the least done.
  * So the cap scales with the price, by whichever of the two rates is further
  * above the reference, and never below 1: a cheaper model

@@ -360,7 +360,7 @@ describe('reading the devices off a picture', () => {
         { status: 200 },
       );
     }) as unknown as typeof fetch;
-    const result = await locateDevices({ provider: 'openai', modelId: 'gpt-6.1-sol', apiKey: 'k', picture: png(1), devices, fetchImpl });
+    const result = await locateDevices({ provider: 'openai', modelId: 'gpt-6.2-sol', apiKey: 'k', picture: png(1), devices, fetchImpl });
     expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
     const sent = JSON.parse(await (calls[0]!.body as Blob).text());
     expect(sent.text.format.strict).toBe(true);
@@ -609,7 +609,7 @@ describe('the reader', () => {
       expect(await homeLocator(settings)()).toEqual(both);
 
       await settings.setMappingProvider('openai');
-      await settings.setAiModel('gpt-6-astra', 'openai');
+      await settings.setAiModel('gpt-6.2-astra', 'openai');
       expect(await homeLocator(settings)()).toEqual(both);
     });
 

@@ -142,9 +142,13 @@ function completed(): Response {
 }
 
 /** The `input` the last OpenAI request carried. */
+/** The conversation a request carried, after the system prompt that heads it. */
 function openAiSent(): unknown[] {
   const init = vi.mocked(globalThis.fetch).mock.calls.at(-1)?.[1] as RequestInit | undefined;
-  return (JSON.parse(String(init?.body)) as { input: unknown[] }).input;
+  const body = JSON.parse(String(init?.body)) as { input: unknown[] };
+  expect(body).not.toHaveProperty('instructions');
+  expect(body.input[0]).toEqual({ role: 'developer', content: 'system' });
+  return body.input.slice(1);
 }
 
 describe('photos on OpenAI', () => {
@@ -154,7 +158,7 @@ describe('photos on OpenAI', () => {
 
   const openAi = (): ChatTransport => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(completed())));
-    return createOpenAiTransport(options('gpt-6.1-sol'));
+    return createOpenAiTransport(options('gpt-6.2-sol'));
   };
 
   it('sends a text-only message exactly as it always did', async () => {

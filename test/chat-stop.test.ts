@@ -465,6 +465,7 @@ describe('a round stopped part-way, on each vendor', () => {
     transport.pushUser('never mind');
     await transport.round(undefined, new AbortController().signal);
     expect(bodyOf(fetchMock, 1).input).toEqual([
+      { role: 'developer', content: 'system' },
       { role: 'user', content: 'is the kitchen light on?' },
       { role: 'assistant', content: 'The kitchen light is' },
       { role: 'user', content: 'never mind' },

@@ -386,8 +386,11 @@ describe('the requests themselves', () => {
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer test-key');
     expect(JSON.parse(init.body as string)).toEqual({
       model: 'gpt-6-luna',
-      instructions: TITLE_INSTRUCTIONS,
-      input: [{ role: 'user', content: ask('openai').prompt }],
+      // Never top-level `instructions`, which GPT-6.2 puts after the input.
+      input: [
+        { role: 'developer', content: TITLE_INSTRUCTIONS },
+        { role: 'user', content: ask('openai').prompt },
+      ],
       reasoning: { effort: 'low' },
       max_output_tokens: 1024,
       store: false,
@@ -655,7 +658,7 @@ describe('naming a conversation', () => {
     };
     const { assistant } = await started({ askTitle: ask });
     // A conversation opened on OpenAI asks OpenAI first.
-    await assistant.start({ memberId, message: 'why is the hall sensor offline?', turn: { model: 'gpt-6.1-sol' } });
+    await assistant.start({ memberId, message: 'why is the hall sensor offline?', turn: { model: 'gpt-6.2-sol' } });
     await assistant.idle();
     await assistant.names();
     expect(asked.map((request) => request.provider)).toEqual(['openai', 'anthropic']);

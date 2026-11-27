@@ -278,16 +278,16 @@ the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
 **Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic, with
-**`claude-fable-5-2`** (Fable 5.2) offered above it, and **`gpt-6.1-sol`** (GPT-6.1 Sol) on
-OpenAI, with **`gpt-6-astra`** offered above Sol — every one pinned as an
+**`claude-fable-5-2`** (Fable 5.2) offered above it, and **`gpt-6.2-sol`** (GPT-6.2 Sol) on
+OpenAI, with **`gpt-6.2-astra`** (GPT-6.2 Astra) offered above Sol — every one pinned as an
 explicit id rather than a floating alias, so no vendor can re-point what a home
 runs without somebody here deciding to. The choice is an allowlist, not a free
 string (`src/ai/models.ts`), because the research tools have model floors —
 Anthropic's `_20260209` tools only exist on Opus 4.6+ and Sonnet 4.6+, so
 pointing the hub at Haiku 4.5 or a 4.5-era model would not degrade the run, it
 would 400 it. The allowlist is every model this hub has ever run: Fable 5.2
-and 5.1, Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol
-and Terra, GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` —
+and 5.1, Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.2 Astra
+and Sol, GPT-6.1 Sol and Terra, GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` —
 the bare OpenAI alias, accepted because a hub that stored it must not be told its setting
 is invalid, but never offered as a choice.
 
@@ -308,8 +308,8 @@ a way that is easy to underestimate, because the descriptor is cached per device
 somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
 *cheaper* models and says nothing against a more thorough one, so Anthropic's
-list is Opus 5.5 with Fable 5.2 above it and OpenAI's is GPT-6.1 Sol with Astra
-above it, while Sonnet, Haiku, Terra and Luna — all offered to the agents — are
+list is Opus 5.5 with Fable 5.2 above it and OpenAI's is GPT-6.2 Sol with GPT-6.2
+Astra above it, while Sonnet, Haiku, Terra and Luna — all offered to the agents — are
 on neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
@@ -318,7 +318,8 @@ that had chosen it as the only homes still running it — exactly the homes the
 retirement is for — and silently, since nothing on any screen would have
 changed. So every model the hub has known names the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; Fable 5.1 → Fable 5.2; GPT-5.6 Sol
-and the alias → GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra), a run is given the first model along that
+and the alias → GPT-6 Sol → GPT-6.1 Sol → GPT-6.2 Sol; GPT-6 Astra → GPT-6.2 Astra;
+GPT-5.6 Terra → GPT-6.1 Terra), a run is given the first model along that
 chain which is still offered, and only where there is none the vendor's default.
 It is resolved on every read and **never written back**: updating the hub is all
 it takes, with no migration and nothing for its owner to do, and the previous
@@ -339,7 +340,7 @@ the one nobody can judge.
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
 Neither API reports what a run cost, so the hub prices its own token usage
 against list prices (input, output, cache reads at 0.1× — 0.05× on Opus 5.5,
-Sonnet 5.5 and GPT-6.1 Sol and 0.025× on Fable 5.1 and 5.2, each of which says so on its
+Sonnet 5.5, GPT-6.2 Astra and Sol and GPT-6.1 Sol and Terra, and 0.025× on Fable 5.1 and 5.2, each of which says so on its
 own row — cache writes at 1.25×, web searches at $10/1000) and
 `status.lastRun.costUsd` is an **estimate**. **It is priced one request at a
 time and then added up**, never from a run's token totals: GPT-6 bills a prompt
@@ -348,10 +349,10 @@ everything, for that whole request — and a run re-sends its whole conversation
 every turn, so its totals cross either line long before any one prompt does. An
 unknown model falls back to the most expensive known tier, so the cap can only
 ever trip early. **The cap is in the run's own model's dollars**: $2 was sized
-against Opus 5's $5/$25, and a model priced above that — GPT-6 Astra at twice
-it, Fable 5.2 at 1.6 times — gets it stretched by the same factor (`budgetScale`), so
+against Opus 5's $5/$25, and a model priced above that — Fable 5.2 and GPT-6.2
+Astra at 1.6 times it, GPT-6 Astra (no longer offered) at twice — gets it stretched by the same factor (`budgetScale`), so
 choosing the most thorough model buys a more thorough run rather than one cut
-off at half the work. A cheaper model keeps the same $2 ceiling rather than a
+off part way through the work. A cheaper model keeps the same $2 ceiling rather than a
 tighter one. OpenAI reports cached input and cache writes *inside* the input
 count, so both shares are subtracted out before each is billed at its own rate —
 otherwise a cache write would be counted twice.
@@ -551,6 +552,19 @@ echoes those opaque items on the next turn. That keeps reasoning context across
 a tool call without creating a retrievable Responses conversation; account data
 handling remains subject to the OpenAI API data controls.
 
+**The system prompt is the first `developer` item of `input`, never top-level
+`instructions`** — in this loop, in the agents' chat transport and in the
+request that names a conversation (`developerMessage`, `src/ai/openai-wire.ts`).
+From GPT-6.2 on, the Responses API appends `instructions` *after* `input` and
+bills them at the uncached rate on every request, however often they repeat;
+this prompt is ten kilobytes resent on every turn of a run of up to forty, so
+the field would have made the one part of the request that never changes the
+one part never cached. At the head of `input` it is where OpenAI's prompt
+caching guide puts reusable instructions, and every earlier model reads it
+exactly as it read the field. The same release drops the reasoning carried with
+an earlier item when that item is edited, which nothing here does: a run is
+only ever appended to.
+
 A mapping run sends no home names, member names, tokens, or any other hub data
 — and, since the hub gained a traffic inspector, it is worth saying explicitly
 that **none of that traffic is an input either**: see "What can reach the
@@ -717,6 +731,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `agent-core.ts` | Everything about a run that is not one vendor's API: the guardrails (turns, cost cap, watchdog, output ceiling, effort), the `AgentStep` vocabulary, the `submit_mapping` schema and description, `evaluateSubmission`, and the `MappingProvider` seam the mapper (and tests) use. **Imports no SDK** — which is what stops a hub configured with only an OpenAI key loading the Anthropic one to satisfy an import chain. |
 | `agent.ts` | The Anthropic loop, on the Messages API: the tool set (`web_search_20260209` + `web_fetch_20260209` + `submit_mapping`), prompt caching, `pause_turn` resumption, failure classification, run stats. Re-exports `agent-core.ts`, so callers did not move. |
 | `openai-agent.ts` | The same run on OpenAI's Responses API, over plain `fetch` — no second SDK for a Pi to download. Hosted `web_search` and `submit_mapping`; `store: false` with reasoning items echoed back; the same caps and step vocabulary. |
+| `openai-wire.ts` | What every OpenAI request sends the same way: the system prompt as the first `developer` item of `input` (`developerMessage`), never as `instructions`. Imports nothing. |
 | `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the offered `choices` lists the apps draw, and the list prices (and long-prompt rates) the cost caps and `costUsd` estimate are computed from, one request at a time. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules) — built **per provider**, because the research paragraph names tools and the two loops do not have the same ones; the per-device task prompt carrying the whole research brief; and the zigbee2mqtt.io page URL. |

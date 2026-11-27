@@ -58,7 +58,7 @@ const prose = (text = 'I think it is a soil sensor.') => ({
 
 interface SentRequest {
   model: string;
-  instructions: string;
+  instructions?: string;
   input: Array<Record<string, unknown>>;
   tools: Array<Record<string, unknown>>;
   include: string[];
@@ -200,7 +200,11 @@ describe('the mapping agent on OpenAI', () => {
     // The descriptor's semantic rules are what the resubmit loop is for.
     expect(submit.parameters).not.toHaveProperty('$schema');
 
-    expect(request.instructions).toBe('a system prompt');
+    // The system prompt heads `input` as a `developer` item and is never sent
+    // as `instructions`, which GPT-6.2 puts after the input and bills uncached
+    // every turn.
+    expect(request).not.toHaveProperty('instructions');
+    expect(request.input[0]).toEqual({ role: 'developer', content: 'a system prompt' });
     expect(request.include).toEqual(['reasoning.encrypted_content']);
     expect(request.reasoning.effort).toBe('high');
     expect(request.store).toBe(false);
@@ -366,14 +370,14 @@ describe('the mapping agent on OpenAI', () => {
     const turn = (input: number) => ({ input_tokens: input, output_tokens: 0 });
     queue(ok([reasoning(), prose()], turn(200_000)), ok([reasoning('rs_2'), submitCall(validDescriptor)], turn(200_000)));
     let cost = -1;
-    await agent('gpt-6.1-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    await agent('gpt-6.2-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
     // Two prompts of 200K at $2 — not one of 400K at $4.
     expect(cost).toBeCloseTo(0.8, 5);
 
     sent.length = 0;
     replies.length = 0;
     queue(ok([submitCall(validDescriptor)], { input_tokens: 300_000, output_tokens: 10_000 }));
-    await agent('gpt-6.1-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    await agent('gpt-6.2-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
     // One prompt past the line: 300K at $4, and 10K out at $15.
     expect(cost).toBeCloseTo(1.35, 5);
   });

@@ -2356,7 +2356,7 @@ what can be done about it:
 
 ```json
 {
-  "failure":  { "provider": "openai", "model": "gpt-6.1-sol", "kind": "billing", "messageId": "…" },
+  "failure":  { "provider": "openai", "model": "gpt-6.2-sol", "kind": "billing", "messageId": "…" },
   "switchTo": { "model": "claude-opus-5-5", "label": "Opus 5.5", "provider": "anthropic" }
 }
 ```
@@ -2375,7 +2375,7 @@ what can be done about it:
   note. Absent on a note written before the field was.
 - **`switchTo`** is the **other vendor's** agent model **on the tier the
   failed one was on** — the most capable, the recommended, the quicker one at
-  half its price, the quickest: GPT-6 Astra and Fable 5.2, GPT-6.1 Sol and
+  half its price, the quickest: GPT-6.2 Astra and Fable 5.2, GPT-6.2 Sol and
   Opus 5.5, GPT-6.1 Terra and Sonnet 5.5, GPT-6 Luna and Haiku 5.5, each
   offered for the other — so a chat put on the cheaper model is not answered
   again at four times its price. Where the other vendor offers two models on
@@ -2468,9 +2468,9 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                { "id": "claude-opus-5-5", "label": "Opus 5.5",
                                  "note": "Thorough, at half Fable’s price.",
                                  "recommended": true } ] },
-    "openai":    { "hasKey": true, "model": "gpt-6.1-sol",
-                   "models": [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                               { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", …, "recommended": true } ] }
+    "openai":    { "hasKey": true, "model": "gpt-6.2-sol",
+                   "models": [ { "id": "gpt-6.2-astra", "label": "GPT-6.2 Astra", … },
+                               { "id": "gpt-6.2-sol", "label": "GPT-6.2 Sol", …, "recommended": true } ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true, "enabled": true },
   "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
@@ -2484,11 +2484,11 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                              { "id": "claude-opus-5-5", … },
                                              { "id": "claude-sonnet-5-5", … },
                                              { "id": "claude-haiku-5-5", … } ],
-                              "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                                             { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", … },
+                              "openai":    [ { "id": "gpt-6.2-astra", "label": "GPT-6.2 Astra", … },
+                                             { "id": "gpt-6.2-sol", "label": "GPT-6.2 Sol", … },
                                              { "id": "gpt-6.1-terra", "label": "GPT-6.1 Terra", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
-  "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
+  "automations": { "model": "gpt-6.2-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.6-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
@@ -2533,7 +2533,7 @@ than its default. The cheaper tier was retired from it after it produced
 descriptors the hub had to reject and one that named `custom` as an outlet's
 primary capability — a paid run whose result was a tile with no control on it,
 cached against the device *model* for ever. That argument is about *cheaper*
-models, so OpenAI offers GPT-6 Astra above GPT-6.1 Sol (the default) and
+models, so OpenAI offers GPT-6.2 Astra above GPT-6.2 Sol (the default) and
 Anthropic offers Fable 5.2 above Opus 5.5 (the default). Writing it is
 `anthropicModel` / `openaiModel`, with `mappingProvider` beside it when the
 vendor changes too — one `PATCH` carries both, and the hub writes the models
@@ -2545,12 +2545,13 @@ adding a second key later no longer moves recognition to the default vendor.
 succeeded.** Every model the hub has known carries the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; Fable 5.1 → Fable 5.2; GPT-5.6 Sol
 and the `gpt-5.6` alias
-→ GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra — a tier keeps its
+→ GPT-6 Sol → GPT-6.1 Sol → GPT-6.2 Sol; GPT-6 Astra → GPT-6.2 Astra; GPT-5.6
+Terra → GPT-6.1 Terra — a tier keeps its
 tier), and a stored choice counts only while it is still offered: otherwise the
 hub runs the first model along that chain which is, and only where there is none
 the vendor's default. That is per list: recognition offers no Terra, so a
 recognition setting of GPT-5.6 Terra walks off the end of its chain and runs
-GPT-6.1 Sol, the default. A successor is always the same vendor's — the vendor
+GPT-6.2 Sol, the default. A successor is always the same vendor's — the vendor
 was a choice somebody made, the retired id
 was not. **This is resolved on every read and never written back**, which is
 what makes an update all it takes and a rollback harmless: the previous build,
