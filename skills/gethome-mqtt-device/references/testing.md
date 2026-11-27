@@ -22,7 +22,9 @@ gethome studio's MQTT view shows the same traffic, live, without a terminal.
 ## Play the hub's part
 
 The `gethome` account may publish anywhere under `gethome/`, so you can send
-the commands the hub would:
+the commands the hub would. (A [device's own account](convention.md#a-devices-own-account)
+sees and reaches only that device's topics, so watch and play the hub's part
+with `gethome`, not with the device's.)
 
 ```sh
 mosquitto_pub -h "$GETHOME_HUB" -u gethome -P "$GETHOME_MQTT_PASSWORD" \

@@ -1,6 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import type { FastifyInstance, HTTPMethods } from 'fastify';
@@ -18,6 +19,7 @@ import type { AutomationEngine } from '../src/automations/engine.js';
 import type { ZodType } from 'zod';
 import {
   CAPABILITY_KINDS,
+  DECLARABLE_CAPABILITY_KINDS,
   DEVICE_KINDS,
   commandSchema,
   endpointDescriptorSchema,
@@ -26,6 +28,8 @@ import {
   statePatchSchema,
 } from '../src/schema/index.js';
 import { commandTopic, parseTopic } from '../src/adapters/mqtt/convention.js';
+import { readProgram } from '../src/adapters/mqtt/program.js';
+import { readCameraAnnouncement } from '../src/cameras/policy.js';
 import {
   bootedHome,
   loadedAccess,
@@ -318,8 +322,13 @@ describe('the skills, against the schema', () => {
   });
 
   it('name every capability, and no other', () => {
+    // The list under the discovery document is what a document may *declare*,
+    // so it is held to the declarable vocabulary: `camera` is the hub's to
+    // derive, and a document naming it is refused whole — by this hub and by
+    // every hub from before cameras. The loop below still wants every kind
+    // named, which is how the derived one gets its sentence.
     expect(listAfter(read('gethome-mqtt-device', 'references/convention.md'), '**Capabilities**:').sort()).toEqual(
-      [...CAPABILITY_KINDS].sort(),
+      [...DECLARABLE_CAPABILITY_KINDS].sort(),
     );
     for (const [skill, file] of [
       ['gethome-mqtt-device', 'references/capabilities.md'],
@@ -390,7 +399,37 @@ describe('the skills, against the schema', () => {
             if (!isCommandType(example.type)) check('command', commandSchema, example, where);
           } else if ('endpoints' in example) check('discovery document', mqttDiscoverySchema, example, where);
           else if ('endpointId' in example) check('endpoint', endpointDescriptorSchema, example, where);
-          else check('state report', statePatchSchema, example, where);
+          else if ('host' in example) {
+            // What a program says about itself has a reader rather than a
+            // schema, and the reader is lenient — so an example is held to
+            // more than being accepted: the hub has to keep all of it. One
+            // showing a key the hub passes over would teach an agent to send
+            // something that goes nowhere.
+            counted.program = (counted.program ?? 0) + 1;
+            if (!isDeepStrictEqual(readProgram(JSON.stringify(example)), example)) {
+              refused.push(`${where}: program ${JSON.stringify(example)} — the hub would not keep it as written`);
+            }
+          } else if ('streams' in example) {
+            // A camera's announcement is read leniently as well, a stream at
+            // a time, so an example has to come through whole: every stream
+            // kept as written, at an address the hub is willing to fetch.
+            counted.camera = (counted.camera ?? 0) + 1;
+            const read = readCameraAnnouncement(example);
+            if (read.dropped.length > 0 || !isDeepStrictEqual(read.streams, example.streams)) {
+              refused.push(
+                `${where}: camera announcement ${JSON.stringify(example)} — the hub would not serve it as written (${read.dropped.join('; ')})`,
+              );
+            }
+          } else if (isDeepStrictEqual(Object.keys(example), ['id'])) {
+            // What a camera answers `GET /gethome/id` with. The hub compares
+            // it with the device's id, so an example is one: an id a device
+            // may have, or the placeholder for it.
+            counted.proof = (counted.proof ?? 0) + 1;
+            const id = (example as { id?: unknown }).id;
+            if (typeof id !== 'string' || !(id === '<deviceId>' || /^[A-Za-z0-9_-]{1,64}$/.test(id))) {
+              refused.push(`${where}: camera proof ${JSON.stringify(example)} — not an id a device can have`);
+            }
+          } else check('state report', statePatchSchema, example, where);
         }
       }
     }
@@ -401,6 +440,9 @@ describe('the skills, against the schema', () => {
     expect(counted['discovery document']).toBeGreaterThanOrEqual(4);
     expect(counted.endpoint).toBeGreaterThanOrEqual(6);
     expect(counted['state report']).toBeGreaterThan(10);
+    expect(counted.program).toBeGreaterThanOrEqual(2);
+    expect(counted.camera).toBeGreaterThanOrEqual(2);
+    expect(counted.proof).toBeGreaterThanOrEqual(2);
   });
 });
 

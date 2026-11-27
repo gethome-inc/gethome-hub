@@ -332,12 +332,36 @@ there, because those reach the routes as well. `docs/api.md` and
   the feature away from everybody who lives there: Studio claims a hub as *the
   Mac*, so the owner is usually a laptop in a drawer and the phones are plain
   members, and a device called `0x54ef44100047c1bf` has to be fixable by whoever
-  is standing in front of it. Owner-only still guards taking things *away*
-  (`DELETE /devices/:id`, members) and every edit is logged with a name.
+  is standing in front of it. Taking things *away* still needs a key only the
+  owner holds by default (`device.remove` for `DELETE /devices/:id`,
+  `member.remove` for people), and every edit is logged with a name.
   And **the favorites map is not a second source of truth**: it is loaded once
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A removed device is held off the home until its radio lets it go.**
+  `removeDevice` is two things and only the first is done on the spot: the row
+  goes, with a `device.removed` line naming who asked, and the adapter's
+  `forget` is started and **not awaited** — a Zigbee device that cannot answer
+  is asked, refused after the coordinator's ZDO timeout, and removed by force a
+  request later, and a radio that is off (a one-radio board running the other)
+  has no adapter at all. Awaiting it held the request open longer than either
+  app waits. What makes that safe is `pendingForgets`, written to the settings
+  table (`devices.pending_forgets`) **before** the row goes: `deviceUpserted`
+  adopts nothing on it, because a radio that has not unpaired a device still
+  has it and would otherwise hand it back as a new one — fresh id, default
+  name, no room — at its next start; a running adapter is asked at once, a
+  stopped one at its next start (`replayForgets`), and only a `forget` that
+  resolves takes a device off the list. That puts three rules on every
+  adapter's `forget` (`ProtocolAdapter.forget`): stop announcing the device
+  before the first `await`, resolve only once the radio has really let go, and
+  reject rather than resolve when it cannot ask. MQTT is the one protocol that
+  cannot keep a device out: a board switched off when it was removed misses its
+  cleared config and announces itself again when switched on — the device SDK's
+  documented limit, and why the list does not hold an MQTT id once the clear is
+  published. The list is capped at 200 entries, oldest dropped, and an entry
+  this build cannot read is skipped rather than trusted. `docs/api.md` is
+  canonical.
 - **A device being offline is sometimes the plan, and only a person knows.**
   Somebody unplugs a heater for the summer: the device is unreachable, the home
   is fine, and nothing could say so — so the dashboard counted it, put *Needs
@@ -382,6 +406,16 @@ there, because those reach the routes as well. `docs/api.md` and
   And **the network's name is `hub.wifi`'s**: `deviceWire` renders `{}` without
   it (per reader, on the route and the socket), the `activity.read`
   narrowing shape. `docs/api.md` is canonical.
+- **A device may be a program, and the registry only carries the fact.** An
+  MQTT device says so on its own retained topic
+  (`adapters/mqtt/program.ts`), the adapter announces it on the descriptor as
+  `program`, and `deviceWire` renders it with presence as the answer: absent
+  for every device that isn't one. **Memory only, like `wifiNetwork`, and for
+  its reason**: the broker hands the retained message back at every start, so
+  a column would be a second copy of something the device keeps. Every
+  announcement replaces it, so a descriptor without one clears it, and only
+  the MQTT adapter ever sends one. `docs/mqtt-integrations.md` and
+  `docs/api.md` are canonical.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a
@@ -445,3 +479,38 @@ there, because those reach the routes as well. `docs/api.md` and
   `gethome_` and 43 base-62 characters (`crypto.ts`) — letters and digits so it
   copies whole from a terminal, and fixed-length so a string of that shape is a
   gethome key and nothing else — and only its sha256 is ever stored.
+- **A device's broker account is the whole list, written down, and never a
+  password** (`src/core/mqtt-device-accounts.ts`; `deploy/CLAUDE.md` has the
+  root half). Seven things to keep. **The id is the username**, because that is
+  what lets two static `pattern … %u` lines in the ACL confine every account
+  with no rule per device — so the id pattern here must stay the adapter's
+  `DEVICE_ID_PATTERN` (written out, since `core/` imports no adapter;
+  `test/mqtt-device-accounts.test.ts` holds them together), and neither of the
+  broker's own two names may ever be a device. **The hub hashes** — the row
+  holds the line mosquitto's password file holds (`$7$`, PBKDF2-SHA512), so
+  nothing that crosses to root is a secret and the installer can put every
+  account back from the list alone. **Every change rewrites the whole list
+  under a new revision and asks for it to be applied**, list first (renamed
+  into place) and request second (written in place, which is what
+  `PathModified` is sure to notice): a missed request is healed by the next
+  one, and there is no "add" or "remove" for the two sides to disagree about.
+  **A mint the root script refuses is undone** — the row goes, or the one it
+  replaced comes back — because an account the broker never learnt of is a
+  password that can never sign in. **A removed device's row goes at once and
+  the broker is told `REVOKE_SETTLE_MS` later**, so a board listening to its
+  own config topic hears that it was removed before its connection is
+  dropped; `reconcile()` at start is what covers a restart inside that wait,
+  and it asks only when the table and what was last applied differ. And **the
+  service follows `deviceRemoved` itself** (the `FavoritesService`
+  arrangement), which is why that event now carries what the device was on
+  its own protocol: the row has gone by then, and an account is filed under
+  the protocol's id, not the hub's. **Somebody else's device or project is
+  `device.remove`'s** (`mayTakeOver`): a new password takes the board off
+  the broker and the account speaks for the device, so an id another member
+  gave an account (or whose member has left), one already in the home
+  (`inHome`, which only the route knows) and a project key on another
+  member's accounts are refused to a caller holding only `device.add`, inside
+  the queue and the transaction so two requests cannot both find it free.
+  An absent `mayTakeOver` is no, so a caller that forgets to ask is refused
+  rather than widened; a caller other than the route must say `inHome`
+  itself.

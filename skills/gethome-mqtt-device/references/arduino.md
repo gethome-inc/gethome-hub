@@ -40,7 +40,7 @@ DHT dht(27, DHT22);
 WiFiClient network;
 PubSubClient mqtt(network);
 bool pumpOn = false;
-unsigned long lastClimate = 0, lastAttempt = 0;
+unsigned long lastClimate = 0, lastAttempt = 0, lastBeat = 0;
 
 String topic(const char *suffix) { return String("gethome/device/") + DEVICE_ID + suffix; }
 
@@ -81,6 +81,8 @@ bool connectToHub() {
   }
   mqtt.publish((String("gethome/discovery/") + DEVICE_ID + "/config").c_str(), DISCOVERY, true);
   mqtt.publish(availability.c_str(), "online", true);
+  mqtt.publish(topic("/heartbeat").c_str(), "60", true);   // how often we speak, in seconds
+  lastBeat = millis();
   publishPump();
   publishClimate();
   mqtt.subscribe(topic("/set").c_str());     // endpoint 1's commands; endpoint 2 takes none
@@ -106,6 +108,7 @@ void loop() {
   }
   mqtt.loop();
   if (millis() - lastClimate > 60000) { lastClimate = millis(); publishClimate(); }
+  if (millis() - lastBeat > 60000) { lastBeat = millis(); mqtt.publish(topic("/heartbeat").c_str(), "60", true); }
 }
 ```
 
@@ -116,7 +119,12 @@ void loop() {
   returning `false`, silently. The discovery document alone is larger.
 - **The last will is set in `connect()`** (`willQos` 1, `willRetain` true), so
   the broker publishes `offline` for the board if it vanishes without saying
-  goodbye — power cut, crash, Wi-Fi lost.
+  goodbye — power cut, crash, Wi-Fi lost. PubSubClient's keepalive is 15 s, so
+  that is about 22 s after the board goes.
+- **A heartbeat every minute**, retained: only a running broker sends a will,
+  and a hub that lost power comes back holding the board's `online`. With the
+  heartbeat, a board that stays quiet for two and a half minutes reads offline
+  all the same.
 - **Everything is published again on every connection**, document first,
   because the hub drops state from a device whose document it has not seen.
 - **Commands are applied, then reported**; an unknown `type` is ignored.

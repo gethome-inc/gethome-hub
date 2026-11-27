@@ -261,6 +261,43 @@ A trace records the commands a guard **refused** as well as the ones it sent:
 "nothing happened" and "the hub declined to switch that relay for the fortieth
 time this hour" look identical from outside.
 
+### Where a rule came from
+
+`src/automations/origin.ts`. A shared home asks two things about a rule that
+switches the hall light on at three in the morning — *who put that there*, and,
+for one nobody remembers adding, *did a person write it or did something*. The
+activity log answers for thirty days and the version notes for ten edits; a
+rule lives for years. So every rule on the wire carries `origin`, built from
+two facts stored on its row and kept apart because they age differently:
+
+- **who** is `automations.created_by`, which every rule has always had. It is
+  a live reference — it follows a member's rename and is `ON DELETE SET NULL`
+  — and nothing keeps a copy of a name to outlive its person;
+- **how** is `automations.origin`, written by `AutomationStore.create` and by
+  nothing else: `{kind}` — `chat`, `template` or `document` — with the
+  template's key, and the API key's id and name when a key sent it. It is a
+  fact about one moment, so an edit, a rename and a revert all leave it alone.
+
+**The hub records what it can see.** It knows the route and the credential. It
+does not know which app held a member's own sign-in, and `document` does not
+pretend to: it is "a finished rule was sent", whoever sent it. A key rides
+beside `kind` rather than being one, because `POST /automations/templates/:key`
+takes a key too.
+
+**`sentence` is the contract** — `Added by Anna in a chat` — and the fields
+beside it are the activity log's own (`memberName`, `via: "api"`, `apiKeyId`,
+`apiKeyName`, `template`), so there is one vocabulary for "who did this". `kind`
+is open on the wire and in the store alike: a build that meets a word a newer
+one wrote, after a rollback, carries it through and says who.
+
+**It says the same thing as the first version's note, and both are kept.** The
+note reads beside the notes of the edits that followed and is evicted with the
+eleventh; the origin is on the rule. Migration `0022` reads `chat` and
+`template` back out of the notes that had not been evicted yet. A rule whose
+first note is the plain `created` is left unknown on purpose — that note was
+written for a member's sign-in and for an API key alike.
+[The API reference](api.md#where-a-rule-came-from) has the fields.
+
 ### A trace is written in the home's words
 
 Both apps print a run's `cause` and each step's `summary` exactly as they

@@ -67,7 +67,7 @@ flowchart TB
 
 ## What it does
 
-- **Every device, one app.** Matter devices, Zigbee devices (through [Zigbee2MQTT](https://www.zigbee2mqtt.io) and a USB stick) and your own MQTT hardware all speak one typed schema — 27 capabilities across 16 kinds of device — so each gets controls that fit it. → [Zigbee](docs/zigbee.md) · [Matter](docs/matter.md) · [the schema](docs/device-schema.md)
+- **Every device, one app.** Matter devices, Zigbee devices (through [Zigbee2MQTT](https://www.zigbee2mqtt.io) and a USB stick) and your own MQTT hardware all speak one typed schema — 28 capabilities across 16 kinds of device — so each gets controls that fit it. → [Zigbee](docs/zigbee.md) · [Matter](docs/matter.md) · [the schema](docs/device-schema.md)
 - **Ask the house.** An assistant answers questions about your home, works your devices and presses your scenes — typed, or spoken. It runs on your own Anthropic or OpenAI key; the spoken version needs an OpenAI key. → [The assistant](docs/assistant.md)
 - **Rules in plain words.** Describe what you want and an agent writes the rule, shows it back to you as a flow and saves it *switched off* until you turn it on. Scenes are rules you can press. Rules keep running with no AI key at all. → [Automations](docs/automations.md)
 - **Devices it has never seen.** Pair a Zigbee device the hub doesn't know and an agent works out what it is, so it gets real controls instead of a blank tile. It needs your AI key; without one the device still appears, flagged *needs review*. → [AI device recognition](docs/ai-adaptation.md)

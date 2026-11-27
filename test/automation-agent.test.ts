@@ -1227,6 +1227,10 @@ describe('the chat service', () => {
     const saved = engine.get(data.automationId);
     expect(saved?.name).toBe('Evening lights');
     expect(saved?.enabled).toBe(false);
+    // And it remembers how it got here, on the rule itself rather than only in
+    // the note on its first version, which ten edits would evict.
+    expect(saved?.origin).toEqual({ kind: 'chat' });
+    expect(saved?.createdBy).toBe(memberId);
   });
 
   it('asks for that line in the same message as the call, not after it', async () => {

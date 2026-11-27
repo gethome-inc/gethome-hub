@@ -16,11 +16,11 @@ units — a 2-relay module has two). Each endpoint has:
 - `deviceKind` — what it is, for display: `light, camera, sensor, climate,
   lock, outlet, airPurifier, shade, speaker, wallSwitch, fan, vacuum,
   appliance, energy, tv, remote`
-- `capabilities` — what it can do (subset of the 27 below)
+- `capabilities` — what it can do (subset of the 28 below)
 - `primaryCapability` — the headline capability
 - `state` — the typed state object below
 
-## The 27 capabilities and their units
+## The 28 capabilities and their units
 
 | Capability | State location | Unit / range |
 |---|---|---|
@@ -51,8 +51,15 @@ units — a 2-relay module has two). Each endpoint has:
 | `event` | `event.*` (below) | stateless input events — buttons, remotes, cubes |
 | `irRemote` | `irRemote.*` (below) | IR blaster / universal remote — learn + replay a library of codes |
 | `custom` | `custom.*` (below) | the universal fallback — declared generic controls for any parameter that fits no capability above |
+| `camera` | `camera.streams` (below) | what a camera can show — **derived by the hub, never declared** |
 
 Plus `reachable: boolean` on every state.
+
+The first 27 are the **declarable** kinds: what an adapter's mapper, an MQTT
+integration's discovery document, an AI mapping or an automation may name.
+`camera` is added by the hub itself (see below), and a document naming it is
+refused — which is also what a hub from before cameras would do, to the whole
+document.
 
 ### The `event` capability
 
@@ -234,3 +241,33 @@ switches, sensors, HVAC, closures, entertainment, appliances, and energy
 devices, with infrastructure types (root node, bridge plumbing, OTA) filtered
 out. Zigbee and MQTT devices use the same kinds/capabilities vocabulary, so
 the catalog doubles as the reference for what each kind means.
+
+### The `camera` capability
+
+A camera endpoint's state says what it can show, and nothing about where:
+
+```json
+{
+  "camera": {
+    "streams": [
+      { "id": "still", "kind": "snapshot", "label": "Still", "width": 640, "height": 480 },
+      { "id": "live", "kind": "mjpeg", "label": "Live", "width": 640, "height": 480 }
+    ]
+  }
+}
+```
+
+`kind` is `snapshot` (one JPEG) or `mjpeg` (a live stream) today, and an open
+string: an app skips a kind it doesn't know. An app fetches a stream through
+the hub — `GET /api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot` or
+`/mjpeg`, which needs `camera.view` (`docs/api.md`) — and never learns the
+camera's address.
+
+**The hub writes this; a device never does.** An MQTT camera announces its
+streams on its camera topic (`docs/mqtt-integrations.md`), the hub adds `camera`
+to that endpoint's capabilities and writes this state without the addresses,
+and a device that publishes a `camera` key in its own state has it stripped. A
+camera endpoint always carries an ordinary capability as well (`onOff` for its
+light, or `custom`), because an app from before cameras ignores the `camera`
+kind and needs something else on the endpoint to draw.
+

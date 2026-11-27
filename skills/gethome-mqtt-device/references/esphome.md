@@ -57,6 +57,10 @@ mqtt:
           "endpoints":[
           {"endpointId":1,"deviceKind":"appliance","capabilities":["onOff"],"primary":"onOff"},
           {"endpointId":2,"deviceKind":"sensor","capabilities":["temperature","humidity"],"primary":"temperature"}]}
+    - mqtt.publish:
+        topic: gethome/device/greenhouse/heartbeat
+        payload: "60"            # how often we speak, in seconds
+        retain: true
     - script.execute: publish_pump
     - script.execute: publish_climate
   on_disconnect:
@@ -74,6 +78,18 @@ mqtt:
             id(pump).toggle();
           }
           // Any other type is not this device's to do: ignore it.
+
+interval:
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            mqtt.connected:
+          then:
+            - mqtt.publish:
+                topic: gethome/device/greenhouse/heartbeat
+                payload: "60"
+                retain: true
 
 switch:
   - platform: gpio
@@ -130,6 +146,10 @@ script:
   birth message as it connects, before `on_connect` runs; on the very first
   connection the hub has not seen the document yet and drops it, which is
   harmless because a new device starts out online.
+- **A heartbeat every minute** (`on_connect`, then `interval:`), retained:
+  only a running broker sends a will, and a hub that lost power comes back
+  holding the board's `online`. With the heartbeat, a board that stays quiet
+  for two and a half minutes reads offline all the same.
 - **The relay reports through its own triggers**, so a command, a button on the
   board and an automation all produce the same report.
 - **`lroundf(x * 100)`** — the hub wants hundredths of a degree as an integer;

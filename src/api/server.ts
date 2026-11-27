@@ -75,6 +75,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
+import { describeOrigin, originThroughKey } from '../automations/origin.js';
 import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationDevices, automationRoom } from '../automations/scope.js';
@@ -109,6 +110,14 @@ import { ownIPv4Addresses, proofAddress, proveIdentity } from '../core/hub-proof
 import type { HubWifiView } from '../core/device-network.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
+import {
+  MAX_MQTT_DEVICE_ACCOUNTS,
+  MQTT_ACCOUNT_ID,
+  MQTT_PROJECT_KEY,
+  MqttDeviceAccounts,
+  mqttAccountTopics,
+  type MqttDeviceAccount,
+} from '../core/mqtt-device-accounts.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
 import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
@@ -153,7 +162,10 @@ import {
   KEY_RATE_CLOSE_CODE,
   MemberSessions,
   UNAUTHORIZED_CLOSE_CODE,
+  type MemberSession,
 } from './ws.js';
+import { PanelError, PanelService } from '../panels/store.js';
+import { CameraError, CameraProxy, cameraStatus } from '../cameras/proxy.js';
 
 export interface ApiDeps {
   db: Db;
@@ -170,6 +182,14 @@ export interface ApiDeps {
   history: HistoryService;
   /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
   portraits: PortraitService;
+  /**
+   * The panels installed on devices' pages, of every kind — `panels/store.ts`.
+   * Optional for the reason `allowedHosts` gives: a suite that doesn't care
+   * gets one made here, empty.
+   */
+  panels?: PanelService;
+  /** The camera proxy — `cameras/proxy.ts`. Optional for the same reason. */
+  cameras?: CameraProxy;
   /**
    * The photos a home, or one person, chose to keep — `photos/store.ts`.
    *
@@ -269,6 +289,19 @@ export interface ApiDeps {
    */
   mqtt: MqttBrokerConfig;
   /**
+   * The devices that hold a broker account of their own
+   * (`core/mqtt-device-accounts.ts`). Optional: the process that owns the
+   * clock builds one so it can settle the list at start and stop its timer at
+   * the end; a suite leaves it out and the server builds its own from the same
+   * database and data directory.
+   */
+  mqttDeviceAccounts?: MqttDeviceAccounts;
+  /**
+   * How long a device-account change waits for the root script before it
+   * answers `pending`. Optional so a suite can make it short.
+   */
+  mqttAccountApplyWaitMs?: number;
+  /**
    * The broker tap behind the apps' traffic inspector. Absent when the MQTT
    * adapter is off, in which case the `mqtt` WebSocket stream is simply not
    * advertised — the socket says what it can offer rather than failing a
@@ -342,6 +375,8 @@ interface CommissionJob {
  * way to hand a Raspberry Pi ten megabytes of anything.
  */
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
+/** A `web` panel's 512 KB, base64'd, with room for the JSON around it. */
+const PANEL_BODY_LIMIT = 1024 * 1024;
 
 /**
  * One photo at the ceiling as a JSON encoder writes it: its base64, plus room
@@ -629,6 +664,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const apiKeys = new ApiKeyService(deps.db);
   const principal = requirePrincipal({ pairing: deps.pairing, apiKeys, access: deps.access });
 
+  /** A broker account for each device — `core/mqtt-device-accounts.ts`. */
+  const mqttDeviceAccounts =
+    deps.mqttDeviceAccounts ??
+    new MqttDeviceAccounts({
+      db: deps.db,
+      dataDir: deps.dataDir,
+      events: deps.events,
+      reserved: [deps.mqtt.username, deps.mqtt.integrationUsername],
+      log: deps.log.child({ module: 'mqtt-accounts' }),
+      ...(deps.mqttAccountApplyWaitMs !== undefined ? { applyWaitMs: deps.mqttAccountApplyWaitMs } : {}),
+    });
+
   /**
    * The floor: any member of this home, whatever their role.
    *
@@ -751,6 +798,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }),
   );
 
+  /**
+   * Made here when a suite didn't pass them, so the routes are always there;
+   * `src/index.ts` passes the real ones, loaded and shut down with the hub.
+   */
+  const panels = deps.panels ?? new PanelService(deps.db, deps.events, deps.dataDir, deps.log);
+  const cameras = deps.cameras ?? new CameraProxy({ log: deps.log });
+  /** What the socket reads: the same services the routes use, never a second copy. */
+  const socketDeps: ApiDeps = { ...deps, panels, cameras };
+  // A stream left relaying after the server closed would hold its socket open.
+  app.addHook('onClose', async () => cameras.close());
   const commissionJobs = new Map<string, CommissionJob>();
   /**
    * Who is holding a live event stream, so removing them can hang it up.
@@ -759,6 +816,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * instance, and a registry outliving it would be a registry of dead ones.
    */
   const sessions = new MemberSessions();
+  /**
+   * Who is watching a camera live, filed the same way and for the same
+   * reason: an MJPEG stream authorizes once, when it opens, and then relays
+   * frames for as long as the app holds it. Kept apart from `sessions`
+   * because a key's sockets are counted against `MAX_SOCKETS_PER_KEY` and its
+   * cameras against the proxy's own limit, and neither should spend the
+   * other's.
+   */
+  const cameraViewers = new MemberSessions();
 
   /**
    * Why an explicitly requested **recognition** run must not start, or `null`
@@ -884,6 +950,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const hubStatus = createHubStatusReader(deps);
   const wifiNetworksCapability = wifiAvailability(deps.dataDir);
+  const mqttDeviceAccountsCapability = {
+    ...mqttDeviceAccounts.availability(),
+    max: MAX_MQTT_DEVICE_ACCOUNTS,
+  };
 
   /** No credential at all — the health check, the claim, and the proof. */
   const open = { config: { apiKey: 'public' as const } };
@@ -912,6 +982,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, presence the capability: a hub carrying this block shows
+    // cameras through itself (`/cameras/…`), and these are the stream kinds it
+    // relays and how many cameras it streams at once. `maxStreamsPerKey`
+    // arrived later and says how many of those one API key may open itself;
+    // a hub without it lets no key watch a camera at all.
+    cameras: cameras.describe(),
+    // Additive, presence the capability: a hub carrying this block keeps
+    // panels on devices' pages (`/devices/:id/panels/…`), within these bounds.
+    // `kinds` names each kind it takes, with that kind's own bounds — a client
+    // offers a kind of panel only where it is named, so a kind a later hub
+    // adds never reaches one that would refuse it. An app that doesn't find
+    // the block offers no panel to install.
+    panels: panels.describe(),
     // Additive, and presence is the capability, the portraits' way: a hub
     // carrying this block draws pictures of rooms (`/room-pictures`).
     roomPictures: roomPictures.describe(),
@@ -944,8 +1027,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // yet — where there is nothing to look for a field on. `problems` says a
     // run's trace marks the steps that were a problem (`problem` on a step,
     // `problems` on the `automationRun` frame) — which is the only way to tell
-    // an unmarked step that was fine from one this hub never marks.
-    automations: { status: true, devices: true, problems: true },
+    // an unmarked step that was fine from one this hub never marks. `origin`
+    // says every rule carries who added it and how (`origin`, which is `null`
+    // where the hub has nothing to say) — so an app can tell a rule with no
+    // origin from a hub that never sends one.
+    automations: { status: true, devices: true, problems: true, origin: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this
@@ -954,6 +1040,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // installer writes it and then restarts the hub, so it cannot change
     // underneath a running one, and this route must not touch the disk.
     wifiNetworks: wifiNetworksCapability,
+    // Additive, and presence is the capability: a hub carrying this block has
+    // `/mqtt/device-accounts`, so an app setting a board up may ask for that
+    // board's **own** broker account — confined to its own topics, gone when
+    // the device is deleted — instead of handing it the one every device
+    // shared. `available: false` says this machine cannot: an installer from
+    // before this, or a broker that asks for no password. An app that does not
+    // find `available: true` here gives the board the `gethome` account from
+    // `GET /settings/mqtt`, exactly as before. Read once, at start, for the
+    // reason `wifiNetworks` is: the installer writes it and then restarts the
+    // hub, and this route must not touch the disk.
+    mqtt: { deviceAccounts: mqttDeviceAccountsCapability },
     // Additive, and presence is the capability: a hub carrying this block has
     // `/api-keys`, so an app may offer to make a key and an agent may tell the
     // person it is helping that this hub can be given one. `grantable` is what
@@ -1674,7 +1771,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const view = deviceWireView(deps, memberId, request.apiKey);
     return deps.registry
       .listDevices()
-      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
+      .map((device) =>
+        deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view, panels.list(device.id)),
+      );
   });
 
   /**
@@ -1819,15 +1918,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       device,
       deps.favorites.isFavorite(memberId, id),
       deviceWireView(deps, memberId, request.apiKey),
+      panels.list(id),
     );
   });
 
   const roomExists = async (id: string): Promise<boolean> =>
     (await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) })) !== undefined;
 
+  /**
+   * Take a device out of the home, and unpair it.
+   *
+   * Answers once the home has let go — the row, the activity line naming who
+   * did it, the `deviceRemoved` frame — and **not** once the radio has: that
+   * is seconds for a Zigbee device that has to be asked and then forced, and
+   * indefinite for one whose radio is off on a one-radio board. The registry
+   * keeps the device off the home until its radio lets it go
+   * (`DeviceRegistry.removeDevice`), so a 204 is the whole answer an app needs.
+   */
   app.delete('/api/v1/devices/:id', needs('device.remove'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
-    const removed = await deps.registry.removeDevice(id);
+    const removed = await deps.registry.removeDevice(id, actor(request));
     if (!removed) return reply.code(404).send({ error: 'not_found' });
     return reply.code(204).send();
   });
@@ -2115,6 +2225,236 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     announcePortraits(deviceId);
     return reply.code(204).send();
   });
+
+  // ── Panels ───────────────────────────────────────────────────────────────
+
+  /**
+   * Install a panel on a device's page, or replace the one with that id,
+   * whatever kind either is — one collection, so a device never has two
+   * panels under one id.
+   *
+   * `device.edit`, because a panel changes what everybody in the house sees on
+   * that device's page — the same reason a rename needs it. JSON with the files
+   * as base64 rather than an archive, as portraits take a photo: no archive
+   * library on a 512 MB board, and every byte is checked as it is decoded.
+   * An upload identical to what is stored writes nothing and records nothing.
+   *
+   * `kind` is required and checked by the store rather than by zod, so a kind
+   * this hub doesn't keep is its own refusal (`unsupported_panel_kind`) — a
+   * client that skipped `GET /hub`'s `panels.kinds` learns this hub is older
+   * than the panel, rather than that its request was malformed.
+   *
+   * **The member's, never an API key's** — a panel is code every phone in the
+   * house runs, which is more than `device.edit` hands a key elsewhere (a
+   * name, a room, a portrait). Closed is the default a key's route table
+   * gives an undecided write, and the reversible one: opening it later is
+   * additive, closing it after it shipped is not.
+   */
+  app.put(
+    '/api/v1/devices/:id/panels/:panelId',
+    { ...memberOnlyNeeds('device.edit'), bodyLimit: PANEL_BODY_LIMIT },
+    async (request, reply) => {
+      const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
+      const device = deps.registry.getDevice(id);
+      if (!device) return reply.code(404).send({ error: 'not_found' });
+      const body = z
+        .object({
+          kind: z.string().min(1).max(40),
+          title: z.string().min(1).max(60),
+          height: z.number().int().min(60).max(800).optional(),
+          files: z
+            .array(z.object({ path: z.string().min(1).max(120), dataBase64: z.string().max(PANEL_BODY_LIMIT) }).strict())
+            .min(1)
+            .max(64),
+        })
+        .strict()
+        .parse(request.body);
+      try {
+        const member = request.member!;
+        const who = actor(request);
+        const { changed, panel } = await panels.put(
+          id,
+          panelId,
+          { kind: body.kind, title: body.title, files: body.files, ...(body.height !== undefined ? { height: body.height } : {}) },
+          { id: member.id, name: member.name },
+        );
+        if (changed) {
+          await deps.activity.record({
+            kind: 'device.panel',
+            message: `${who.name} installed the panel “${panel.title}” on ${device.name}.`,
+            memberId: who.memberId,
+            deviceId: id,
+            data: { deviceName: device.name, panelId, title: panel.title, ...who.data },
+          });
+        }
+        return { panel, changed };
+      } catch (error) {
+        if (error instanceof PanelError) {
+          const status =
+            error.code === 'invalid_panel' || error.code === 'unsupported_panel_kind'
+              ? 400
+              : error.code === 'storage_low'
+                ? 507
+                : 409;
+          return reply.code(status).send({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete('/api/v1/devices/:id/panels/:panelId', memberOnlyNeeds('device.edit'), async (request, reply) => {
+    const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
+    const device = deps.registry.getDevice(id);
+    if (!device || !(await panels.remove(id, panelId))) return reply.code(404).send({ error: 'not_found' });
+    const who = actor(request);
+    await deps.activity.record({
+      kind: 'device.panel',
+      message: `${who.name} removed a panel from ${device.name}.`,
+      memberId: who.memberId,
+      deviceId: id,
+      data: { deviceName: device.name, panelId, removed: true, ...who.data },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * One file of a panel, for the apps' panel host to load.
+   *
+   * The floor, as reading the device is. The path is looked up in the stored
+   * manifest — never on disk — and every answer says what it is and that it
+   * may not be sniffed into anything else; the CSP is for anything that opens
+   * one of these outside an app, where it must not reach the network either.
+   * Under `files/` rather than straight under the panel, so the panel's own
+   * path stays free for whatever a later kind needs beside its files.
+   */
+  // For the apps' panel host, which holds a member's token; a key has nothing
+  // to run a panel in.
+  app.get('/api/v1/devices/:id/panels/:panelId/files/*', memberOnly, async (request, reply) => {
+    const params = z
+      .object({ id: z.uuid(), panelId: z.string().max(40), '*': z.string().max(200) })
+      .parse(request.params);
+    const found = await panels.file(params.id, params.panelId, params['*']);
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+    const etag = `"${found.file.sha256}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    return reply
+      .header('content-type', found.file.type)
+      .header('x-content-type-options', 'nosniff')
+      .header('cache-control', 'no-cache')
+      .header('etag', etag)
+      .header(
+        'content-security-policy',
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+      )
+      .send(found.data);
+  });
+
+  // ── Cameras ──────────────────────────────────────────────────────────────
+
+  /**
+   * A still from a camera, through the hub.
+   *
+   * `camera.view` — Owner and Member by default, not Guest — because a camera
+   * shows people; a key holds it only when it was given it on purpose
+   * (`KEY_GRANTABLE` says why). The app names the stream by device, endpoint
+   * and stream id and never learns where the camera is; the hub fetches it
+   * from the address the camera announced, after the checks in `cameras/`.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'snapshot');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      try {
+        const jpeg = await cameras.snapshot(target);
+        return reply.header('content-type', 'image/jpeg').header('cache-control', 'no-store').send(jpeg);
+      } catch (error) {
+        if (error instanceof CameraError) return reply.code(cameraStatus(error.code)).send({ error: error.code });
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * A camera live, as MJPEG, through the hub — shared with anybody already
+   * watching it, since the camera serves one client.
+   *
+   * A key is named to the proxy, which lets it open one stream at a time and
+   * never the last free one; a still is a fresh request each time and already
+   * paced by the key's rate limit, so the route above names nobody.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'mjpeg');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      // Filed like a socket, so revoking the key or removing the member hangs
+      // it up at once — and turned away if either happened while this request
+      // was being authenticated (`LATE_ADMISSION_MS`).
+      const memberId = request.member!.id;
+      let key = request.apiKey;
+      let hangUp: (() => void) | null = null;
+      let revoked = false;
+      const viewer: MemberSession = {
+        revoke: () => {
+          revoked = true;
+          hangUp?.();
+        },
+        rekey: (next) => {
+          key = next;
+        },
+      };
+      const admitted = cameraViewers.admit(memberId, viewer, key);
+      if (!admitted) return reply.code(401).send({ error: 'unauthorized' });
+      key = admitted.key;
+      const keyId = key?.id;
+      reply.raw.on('close', () => cameraViewers.forget(memberId, viewer, keyId));
+      // Asked before every frame, as the socket asks before every frame: a
+      // key that has expired, been paused or lost `camera.view`, or a role
+      // that has, sees nothing more.
+      const allowed = () =>
+        !revoked &&
+        (key === null || apiKeyState(key, deps.access) === 'active') &&
+        deps.access.canAs(memberId, 'camera.view', key);
+      const opener = key ? { keyId: key.id } : undefined;
+      try {
+        reply.hijack();
+        hangUp = await cameras.watch(
+          target,
+          reply.raw,
+          (listener) => request.raw.on('close', listener),
+          opener,
+          allowed,
+        );
+        // Revoked while the board was proving itself.
+        if (revoked) hangUp();
+      } catch (error) {
+        const code = error instanceof CameraError ? error.code : 'camera_unreachable';
+        const status = error instanceof CameraError ? cameraStatus(error.code) : 502;
+        if (!reply.raw.headersSent) {
+          reply.raw.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+          reply.raw.end(JSON.stringify({ error: code }));
+        } else {
+          reply.raw.end();
+        }
+      }
+    },
+  );
+
+  /** The stream a camera route names, if the device announced one of that kind. */
+  function cameraTarget(params: unknown, kind: 'snapshot' | 'mjpeg') {
+    const parsed = z
+      .object({ deviceId: z.uuid(), endpointId: z.coerce.number().int().min(0), streamId: z.string().max(32) })
+      .safeParse(params);
+    if (!parsed.success) return null;
+    const { deviceId, endpointId, streamId } = parsed.data;
+    const source = deps.registry.cameraSource(deviceId, endpointId, streamId);
+    if (!source || source.kind !== kind) return null;
+    return { key: `${deviceId}/${String(endpointId)}/${streamId}`, externalId: source.externalId, url: source.url };
+  }
 
   // ── Photos the hub keeps ─────────────────────────────────────────────────
   //
@@ -2861,6 +3201,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   ) {
     const closed = sessions.revoke(memberId);
     if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
+    const watching = cameraViewers.revoke(memberId);
+    if (watching > 0) deps.log.info({ memberId, watching }, 'Closed camera streams for a former member');
     // Their pins went with the member row (`device_favorites.member_id`
     // cascades); this is the in-memory half of the same delete. `access` holds
     // the same kind of map, keyed the same way, and would otherwise answer for
@@ -3249,6 +3591,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Its open streams render with the new grant from the next frame, and
     // the `access` frame every socket re-sends is how they hear it now.
     sessions.rekey(updated);
+    cameraViewers.rekey(updated);
     deps.events.emit('accessChanged');
 
     const accessMoved =
@@ -3303,6 +3646,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const owner = mine ? me.name : ((await deps.pairing.member(key.memberId))?.name ?? null);
     const closed = sessions.revokeKey(id);
     if (closed > 0) deps.log.info({ apiKeyId: id, closed }, 'Closed event streams for a revoked API key');
+    const watching = cameraViewers.revokeKey(id);
+    if (watching > 0) deps.log.info({ apiKeyId: id, watching }, 'Closed camera streams for a revoked API key');
     await apiKeys.remove(id);
     const who = actor(request);
     await deps.activity.record({
@@ -3763,6 +4108,230 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     });
     return answer;
   });
+
+  // ── A broker account for each device ─────────────────────────────────────
+
+  /**
+   * A device's account as an app draws it — never its password, which is in
+   * the answer to the request that made it and nowhere afterwards. `device` is
+   * the device in the home this account belongs to, or null while a board that
+   * was given one has not announced itself yet.
+   */
+  const deviceAccountWire = (account: MqttDeviceAccount) => {
+    const device = deps.registry
+      .listDevices()
+      .find((candidate) => candidate.adapter === 'mqtt' && candidate.externalId === account.deviceId);
+    return {
+      deviceId: account.deviceId,
+      username: account.deviceId,
+      projectKey: account.projectKey,
+      topics: mqttAccountTopics(account.deviceId, account.projectKey),
+      createdAt: account.createdAt,
+      createdBy: account.memberName,
+      device: device ? { id: device.id, name: device.name } : null,
+    };
+  };
+
+  /**
+   * An activity row about a device's account: what the sentence calls the
+   * device, the device it is filed under once there is one, and its `data`.
+   *
+   * **A line about the device, and never `data.memberName`** — `presser`'s
+   * reason exactly. An iPhone build from before this kind draws a row it has
+   * never met from `message`, titled by the device where the row names one
+   * and by `memberName` where it does not, so a row carrying it would read
+   * "Anna" over "Anna gave Desk light its own MQTT account", the name twice —
+   * and a phone keeps whichever build it has. Without it the title is the
+   * device, or "Hub" for a board that has not arrived yet, over a sentence
+   * that says who. `memberId` still makes the row the member's.
+   */
+  const accountRow = (request: FastifyRequest, deviceId: string) => {
+    const device = deps.registry
+      .listDevices()
+      .find((candidate) => candidate.adapter === 'mqtt' && candidate.externalId === deviceId);
+    const who = actor(request);
+    const { memberName: _shownTwice, ...attribution } = who.data;
+    return {
+      who,
+      subject: device ? device.name : `“${deviceId}”`,
+      target: device ? { deviceId: device.id } : {},
+      data: {
+        ...attribution,
+        mqttDeviceId: deviceId,
+        ...(device ? { deviceName: device.name } : {}),
+      },
+    };
+  };
+
+  /**
+   * The devices that hold a broker account of their own — who gave each one
+   * its account and when, and never a password.
+   *
+   * `device.add`, like making one: it is the list of what that permission
+   * handed out. No key reads it, the `hub.mqtt` reasoning — what is on the
+   * broker and under which name is the home's own plumbing.
+   *
+   * `pending` is whether the broker is still behind this list — true from a
+   * change until the machine has applied it, so a client that was answered
+   * `202 {state: "pending"}` can wait here for the account to work rather
+   * than hand a board a password the broker does not know yet. Only where
+   * accounts are available at all: nothing is ever applied elsewhere.
+   */
+  app.get('/api/v1/mqtt/device-accounts', memberOnlyNeeds('device.add'), async () => ({
+    ...mqttDeviceAccountsCapability,
+    ...(mqttDeviceAccountsCapability.available
+      ? { pending: !(await mqttDeviceAccounts.settled()) }
+      : {}),
+    accounts: (await mqttDeviceAccounts.list()).map(deviceAccountWire),
+  }));
+
+  /**
+   * Give a device its own account on the broker, for whoever is setting that
+   * device up to hand to it. The password is in this answer and nowhere else,
+   * ever: the hub keeps the broker's hash of it.
+   *
+   * The account is named for the device — `deviceId` is the id it announces
+   * itself under on the MQTT convention, and its broker username — and it
+   * reaches that device's own topics and nothing else: not another device's
+   * state or commands, not Zigbee, and of `gethome/project/…` only the one
+   * project `projectKey` names. Deleting the device takes it away.
+   *
+   * **Asking again for the same device replaces the password**, and the old
+   * one stops working — which is what setting a board up a second time needs,
+   * since nothing here could hand the old one back.
+   *
+   * **Somebody else's device or project needs `device.remove`.** Replacing an
+   * account takes it away from the board that held it, and the new one
+   * reaches that device's topics — its state, its commands, and the discovery
+   * document whose withdrawal takes it out of the home. So a device another
+   * member gave an account, a device already in the home with none, and a
+   * project key on accounts another member made are refused with the guard's
+   * own `403 forbidden` and that permission, plus a `reason` saying which —
+   * without it `device.add`, which a plain Member holds, would quietly mean
+   * "may take over the front door". Your own device and your own project
+   * stay yours to set up again with `device.add` alone. Asked inside the
+   * service's queue (`mint`), so two requests at once cannot both pass.
+   *
+   * **`device.add`, and not `hub.mqtt`.** The shared password is the owner's
+   * to hand out because nothing can take it back; this one passes the three
+   * tests that put a permission in a role's default set. It is bounded — one
+   * device's own topics. It destroys nothing, and removing the device ends
+   * it, the live connection included. And it is named: this writes a row
+   * saying who gave which device an account. Never through an API key, which
+   * mints no credential of any kind.
+   *
+   * **The body is strict**, the `/api-keys` reasoning: a narrowing field a
+   * later build adds must be a 400 here rather than an account broader than
+   * the caller asked for.
+   */
+  app.post('/api/v1/mqtt/device-accounts', memberOnlyNeeds('device.add'), async (request, reply) => {
+    const body = z
+      .object({
+        deviceId: z.string().regex(MQTT_ACCOUNT_ID),
+        projectKey: z.string().regex(MQTT_PROJECT_KEY).optional(),
+      })
+      .strict()
+      .parse(request.body ?? {});
+    const me = request.member!;
+    const outcome = await mqttDeviceAccounts.mint({
+      deviceId: body.deviceId,
+      projectKey: body.projectKey,
+      member: { id: me.id, name: me.name },
+      mayTakeOver: can(deps.access, request, 'device.remove'),
+      inHome: deps.registry
+        .listDevices()
+        .some((device) => device.adapter === 'mqtt' && device.externalId === body.deviceId),
+    });
+    if (!outcome.ok) {
+      if (outcome.reason === 'held') {
+        return reply.code(403).send({
+          error: 'forbidden',
+          permission: 'device.remove',
+          reason: outcome.held === 'device' ? 'device_held' : 'project_held',
+        });
+      }
+      if (outcome.reason === 'unavailable') {
+        return reply.code(409).send({ error: 'mqtt_device_accounts_unavailable' });
+      }
+      if (outcome.reason === 'reserved') return reply.code(409).send({ error: 'device_id_reserved' });
+      if (outcome.reason === 'limit') {
+        return reply
+          .code(409)
+          .send({ error: 'too_many_device_accounts', limit: MAX_MQTT_DEVICE_ACCOUNTS });
+      }
+      return reply.code(502).send({
+        error: 'mqtt_account_not_applied',
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+      });
+    }
+    // **Your own, again, is not logged** — the sign-in code's rule, and for
+    // its reason. The row that matters is the one saying who gave this device
+    // an account, and it is already there; a board set up a second time, or a
+    // program deployed for the tenth, by the person who set it up the first
+    // time, would be a line each in a feed somebody reads a week later.
+    // Somebody *else* replacing it is a different fact — the device's account
+    // changed hands — and is always written.
+    if (!outcome.replacedOwn) {
+      const row = accountRow(request, body.deviceId);
+      await deps.activity.record({
+        kind: 'device.mqtt-account',
+        message: outcome.replaced
+          ? `${row.who.name} gave ${row.subject} a new password for its own MQTT account.`
+          : `${row.who.name} gave ${row.subject} its own MQTT account.`,
+        memberId: row.who.memberId,
+        ...row.target,
+        data: {
+          ...row.data,
+          action: outcome.replaced ? 'replace' : 'add',
+          ...(body.projectKey !== undefined ? { projectKey: body.projectKey } : {}),
+        },
+      });
+    }
+    const broker = mqttAccess({
+      config: deps.mqtt,
+      requestHost: hostFromRequest(request.headers.host),
+      canUseIntegrations: false,
+      canUseFullAccess: false,
+    });
+    return reply.code(outcome.state === 'applied' ? 201 : 202).send({
+      account: deviceAccountWire(outcome.account),
+      password: outcome.password,
+      host: broker.host,
+      port: broker.port,
+      state: outcome.state,
+    });
+  });
+
+  /**
+   * Take a device's account away without taking the device out of the home —
+   * for a board that was given one and never arrived, or one to cut off now.
+   * Deleting the device does this by itself.
+   *
+   * `device.remove`, because what it does to the device is that permission's
+   * own sentence: the board is off the broker, and nothing in the apps undoes
+   * it short of setting the board up again.
+   */
+  app.delete(
+    '/api/v1/mqtt/device-accounts/:deviceId',
+    memberOnlyNeeds('device.remove'),
+    async (request, reply) => {
+      const { deviceId } = z
+        .object({ deviceId: z.string().regex(MQTT_ACCOUNT_ID) })
+        .parse(request.params);
+      const outcome = await mqttDeviceAccounts.revoke(deviceId);
+      if (outcome === undefined) return reply.code(404).send({ error: 'not_found' });
+      const row = accountRow(request, deviceId);
+      await deps.activity.record({
+        kind: 'device.mqtt-account',
+        message: `${row.who.name} took away the MQTT account ${row.subject} had.`,
+        memberId: row.who.memberId,
+        ...row.target,
+        data: { ...row.data, action: 'revoke' },
+      });
+      if (outcome.state === 'applied') return reply.code(204).send();
+      return reply.code(202).send({ state: 'pending' });
+    },
+  );
 
   /**
    * Pick the radio on a board that can only afford one.
@@ -4259,6 +4828,50 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // ── Automations ──────────────────────────────────────────────────────────
 
   /**
+   * The names an answer about rules needs: who is in the home, and what each
+   * API key that added a rule is called now.
+   *
+   * Read once per answer rather than per rule, and read live rather than kept
+   * on the engine's records — a member who renames themselves is the same
+   * person on every rule they added, and a second copy of their name held in
+   * the engine would be the one that went stale. The keys are read only when
+   * some rule was added through one, which in most homes is never.
+   */
+  type AutomationNames = { members: Map<string, string>; apiKeys: Map<string, string> };
+  const automationNames = async (
+    records: ReadonlyArray<ReturnType<AutomationEngine['list']>[number]>,
+  ): Promise<AutomationNames> => {
+    const members = new Map(
+      (await deps.db.query.members.findMany()).map((row) => [row.id, row.name]),
+    );
+    const throughKey = records.some((record) => record.origin?.apiKeyId !== undefined);
+    const keys = throughKey ? await apiKeys.list() : [];
+    return { members, apiKeys: new Map(keys.map((key) => [key.id, key.name])) };
+  };
+
+  /** A rule's origin, with every name in it as it stands today. */
+  const automationOrigin = (
+    record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
+  ) => {
+    const memberName =
+      record.createdBy !== null ? names.members.get(record.createdBy) : undefined;
+    const keyId = record.origin?.apiKeyId;
+    const keyName = keyId !== undefined ? names.apiKeys.get(keyId) : undefined;
+    const templateKey = record.origin?.template;
+    const templateTitle = templateKey !== undefined ? findTemplate(templateKey)?.title : undefined;
+    return describeOrigin({
+      stored: record.origin,
+      member:
+        record.createdBy !== null && memberName !== undefined
+          ? { id: record.createdBy, name: memberName }
+          : null,
+      ...(keyName !== undefined ? { apiKeyName: keyName } : {}),
+      ...(templateTitle !== undefined ? { templateTitle } : {}),
+    });
+  };
+
+  /**
    * A rule as the apps read it.
    *
    * `summary` is the contract and the document is the convenience — the
@@ -4269,6 +4882,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const automationWire = (
     record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
     /**
      * The home to read the rule against, so a route drawing a list builds it
      * once rather than once per rule. `homeView()` walks every device and every
@@ -4334,6 +4948,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * "this hub does not say" rather than "this rule has never run".
      */
     status: deps.automations.statusOf(record.id),
+    /**
+     * Who added the rule and how it reached the hub (`describeOrigin`):
+     * `sentence` is the whole answer in words, and the fields beside it are
+     * the ones an activity row uses for the same things.
+     *
+     * `null` when there is nothing to say — a rule from before the hub kept
+     * this, whose author has since left the home — and absent altogether on
+     * a hub older than the field, which `GET /hub`'s `automations.origin`
+     * tells apart. The member and the key are named as they are *now*, and a
+     * key that is gone by the name it had.
+     */
+    origin: automationOrigin(record, names),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
@@ -4349,8 +4975,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/automations', authed, async () => {
     const home = deps.automations.homeView();
+    const records = deps.automations.list();
+    const names = await automationNames(records);
     return {
-      automations: deps.automations.list().map((record) => automationWire(record, home)),
+      automations: records.map((record) => automationWire(record, names, home)),
       unreadable: deps.automations.unreadableRules(),
     };
   });
@@ -4377,7 +5005,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const record = deps.automations.get(id);
     if (!record) return reply.code(404).send({ error: 'not_found' });
-    return automationWire(record);
+    return automationWire(record, await automationNames([record]));
   });
 
   /**
@@ -4496,7 +5124,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (report.problems.length > 0) {
       return reply.code(422).send({ error: 'invalid_automation', ...report });
     }
-    const record = await deps.automationStore.create(parsed.data, request.member!.id);
+    // A document, and the key that sent it when one did — which is all the
+    // hub can see. Which app was holding a member's own sign-in is not
+    // something a request says, so nothing here guesses it.
+    const record = await deps.automationStore.create(parsed.data, request.member!.id, 'created', {
+      kind: 'document',
+      ...originThroughKey(request.apiKey),
+    });
     await deps.automations.reload();
     deps.events.emit('automationChanged', record.id);
     const who = actor(request);
@@ -4507,9 +5141,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       data: { automationId: record.id, automationName: record.name, ...who.data },
     });
     const saved = deps.automations.get(record.id);
-    return reply
-      .code(201)
-      .send({ ...(saved ? automationWire(saved) : {}), warnings: report.warnings });
+    return reply.code(201).send({
+      ...(saved ? automationWire(saved, await automationNames([saved])) : {}),
+      warnings: report.warnings,
+    });
   });
 
   /**
@@ -4609,7 +5244,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     const saved = deps.automations.get(id);
-    return { ...(saved ? automationWire(saved) : {}), warnings };
+    return { ...(saved ? automationWire(saved, await automationNames([saved])) : {}), warnings };
   });
 
   app.delete('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
@@ -4654,7 +5289,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.automations.reload();
     deps.events.emit('automationChanged', id);
     const saved = deps.automations.get(id);
-    return saved ? automationWire(saved) : reply.code(404).send({ error: 'not_found' });
+    return saved
+      ? automationWire(saved, await automationNames([saved]))
+      : reply.code(404).send({ error: 'not_found' });
   });
 
   /**
@@ -4688,7 +5325,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         warnings.push(...report.problems);
         continue;
       }
-      const record = await deps.automationStore.create(document, request.member!.id, `from ${key}`);
+      const record = await deps.automationStore.create(
+        document,
+        request.member!.id,
+        `from ${key}`,
+        { kind: 'template', template: key, ...originThroughKey(request.apiKey) },
+      );
       created.push(record.id);
     }
     await deps.automations.reload();
@@ -4703,11 +5345,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Read after the reload above, and once for the whole answer rather than
     // per rule — a template can install several.
     const home = deps.automations.homeView();
+    const installed = created
+      .map((id) => deps.automations.get(id))
+      .filter((record) => record !== undefined);
+    const names = await automationNames(installed);
     return reply.code(201).send({
-      automations: created
-        .map((id) => deps.automations.get(id))
-        .filter((record) => record !== undefined)
-        .map((record) => automationWire(record, home)),
+      automations: installed.map((record) => automationWire(record, names, home)),
       warnings,
     });
   });
@@ -5506,7 +6149,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // fired the moment the socket opens is held — and rendered once the
       // socket knows who is reading — instead of lost in the gap between
       // "connected" and "authorized".
-      const handle = attachWebSocket(socket, deps, sessions, hubStatus);
+      const handle = attachWebSocket(socket, socketDeps, sessions, hubStatus);
       void (async () => {
         const credential = extractCredential(request);
         const result = credential
